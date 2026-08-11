@@ -2,6 +2,17 @@
 name = "copy-cat"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Менеджер истории буфера обмена для Windows: текст и картинки, поиск, закрепление, глобальный хоткей и автовставка."
+authors = ["SchrodingerBox Softworks"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/SchrodingerBox-Softworks/copy-cat"
+homepage = "https://github.com/SchrodingerBox-Softworks/copy-cat"
+keywords = ["clipboard", "clipboard-manager", "windows", "tray", "egui"]
+categories = ["gui", "os::windows-apis", "command-line-utilities"]
+# Приложение, а не библиотека — на crates.io ему делать нечего.
+publish = false
 
 [dependencies]
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "persistence"] }
@@ -22,3 +33,11 @@ windows-sys = { version = "0.61", features = [
 
 [build-dependencies]
 winresource = "0.1"
+
+# Релизный бинарь распространяется одним файлом, поэтому оптимизируем размер
+# и время старта: LTO + один codegen-unit + вырезанные символы.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
