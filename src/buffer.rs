@@ -1,8 +1,8 @@
-//! Хранилище истории буфера обмена и фоновый поток-наблюдатель.
+//! Clipboard history storage and the background thread that watches for changes.
 //!
-//! В ОЗУ живёт только индекс (метаданные записей), сами тела (текст/PNG)
-//! читаются с диска по запросу — превью и «Копировать» подгружают файл
-//! только для выбранного элемента.
+//! Only the index (per-entry metadata) is held in memory. The payloads, text or
+//! PNG, are read from disk on demand, so the preview and the copy button touch
+//! one file at a time.
 
 use arboard::{Clipboard, ImageData};
 use eframe::egui;
@@ -29,11 +29,11 @@ pub struct ClipItem {
     pub timestamp: u64,
     pub size_bytes: u64,
     pub hash: u64,
-    /// Первые ~200 символов текста, только для быстрого рендера списка.
+    /// First ~200 characters, kept around so the list renders without disk reads.
     pub snippet: Option<String>,
-    /// Размеры картинки в пикселях.
+    /// Image size in pixels.
     pub image_dims: Option<(u32, u32)>,
-    /// Закреплённые записи не вытесняются лимитом истории.
+    /// Pinned entries are never evicted by the history limit.
     #[serde(default)]
     pub pinned: bool,
 }
@@ -158,7 +158,7 @@ impl HistoryStore {
         std::fs::read_to_string(self.payload_path(id, "txt")).ok()
     }
 
-    /// Возвращает RGBA-байты, ширину и высоту для превью/копирования картинки.
+    /// RGBA bytes plus width and height, for previewing or copying an image.
     pub fn load_image_rgba(&self, id: u64) -> Option<(Vec<u8>, u32, u32)> {
         let img = image::open(self.payload_path(id, "png")).ok()?.into_rgba8();
         let (w, h) = img.dimensions();
@@ -173,8 +173,8 @@ impl HistoryStore {
         let _ = std::fs::remove_file(self.payload_path(id, ext_for(it.kind)));
     }
 
-    /// Подрезает историю до лимита, начиная со старых. Закреплённые записи
-    /// пропускаются — они живут, пока их не открепят или не удалят вручную.
+    /// Trims the history down to the limit, oldest first. Pinned entries are
+    /// skipped; they stay until unpinned or deleted by hand.
     pub fn trim_to(&mut self, max_items: usize) {
         while self.items.len() > max_items {
             let Some(pos) = self.items.iter().rposition(|it| !it.pinned) else {
@@ -228,20 +228,20 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-// ---------- фоновой наблюдатель ----------
+// ---------- background watcher ----------
 
-/// Разделяемое состояние между UI и фоновым потоком: последний увиденный
-/// хэш (обновляется как при собственных `set_*`, так и при опросе) и лимит
-/// истории. Флаг `stop` даёт UI шанс остановить поток при перезапуске
-/// с другим интервалом опроса.
+/// State shared between the UI and the watcher thread. `last_seen_hash` is
+/// bumped both by our own `set_*` calls and by polling, which is what stops the
+/// app from re-capturing what it just put on the clipboard. The rest are knobs
+/// the settings window can turn while the thread is running.
 pub struct WatcherHandle {
     pub last_seen_hash: Arc<AtomicU64>,
     pub max_items: Arc<AtomicUsize>,
-    /// Пауза захвата — «приватный режим»: буфер не пишется в историю.
+    /// Capture paused: clipboard contents stop going into the history.
     pub paused: Arc<AtomicBool>,
     pub capture_text: Arc<AtomicBool>,
     pub capture_images: Arc<AtomicBool>,
-    /// Интервал опроса в мс; поток перечитывает его каждый цикл.
+    /// Poll interval in ms. The thread re-reads it every cycle.
     pub poll_ms: Arc<AtomicU64>,
 }
 
@@ -300,7 +300,7 @@ fn try_capture_once(
     want_text: bool,
     want_images: bool,
 ) -> bool {
-    // Текст имеет приоритет — Win+Shift+S тексту не мешает.
+    // Text wins over images, so a Win+Shift+S screenshot can't shadow it.
     if let Some(text) = clipboard.get_text().ok().filter(|_| want_text) {
         if text.is_empty() {
             return false;

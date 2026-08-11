@@ -24,11 +24,20 @@ use buffer::{
 
 const ACCENT: Color32 = Color32::PURPLE;
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
+/// Short name for the UI, where the icon and the layout already give context.
 const APP_TITLE: &str = "CopyCat";
+/// Longer name for the title bar, the taskbar and the tray tooltip, where
+/// "CopyCat" on its own tells the user nothing.
+const SYSTEM_TITLE: &str = "CopyCat - Управление буфером обмена";
+/// Filled in by build.rs from the git tag.
+const APP_VERSION: &str = env!("APP_VERSION");
+const VENDOR: &str = "SchrödingerBox Softworks";
+const REPO_URL: &str = "https://github.com/SchrodingerBox-Softworks/copy-cat";
 
-// ---------- сохранение данных ----------
+// ---------- config on disk ----------
 
-/// Папка, в которой лежит запущенный exe — конфиг хранится рядом с `.exe`,
+/// Folder the running exe sits in. Config and history live next to it,
+/// which is what keeps the app portable.
 fn base_dir() -> PathBuf {
     std::env::current_exe()
         .ok()
@@ -40,7 +49,7 @@ fn settings_path() -> PathBuf {
     base_dir().join("settings.json")
 }
 
-/// Загружает JSON-файл, создавая его с содержимым `default`, если файла нет.
+/// Reads a JSON file, first writing `default` to disk if it isn't there yet.
 fn load_json<T: Serialize + DeserializeOwned>(path: &Path, default: T) -> T {
     if !path.exists() {
         let text = serde_json::to_string_pretty(&default).expect("serialize default config");
@@ -53,7 +62,7 @@ fn load_json<T: Serialize + DeserializeOwned>(path: &Path, default: T) -> T {
         .unwrap_or_else(|exc| panic!("failed to parse {}: {exc}", path.display()))
 }
 
-/// Сохраняет значение как отформатированный JSON
+/// Writes the value back as pretty-printed JSON.
 fn save_json<T: Serialize>(path: &Path, value: &T) {
     if let Ok(text) = serde_json::to_string_pretty(value) {
         let _ = std::fs::write(path, text);
@@ -63,28 +72,28 @@ fn save_json<T: Serialize>(path: &Path, value: &T) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct AppSettings {
-    /// Максимум записей истории; лишние (самые старые) удаляются с диска.
-    /// Закреплённые записи лимитом не вытесняются.
+    /// History cap. Anything past it is deleted from disk, oldest first;
+    /// pinned entries are never evicted.
     max_items: usize,
-    /// Как часто фоновой поток опрашивает системный буфер обмена.
+    /// How often the background thread polls the system clipboard.
     poll_interval_ms: u64,
-    /// Комбинация показа окна, например `Ctrl+Shift+V`.
+    /// Shortcut that brings the window up, e.g. `Ctrl+Shift+V`.
     hotkey: String,
     hotkey_enabled: bool,
-    /// Показывать окно рядом с курсором, а не там, где оно было.
+    /// Show the window at the cursor instead of where it was left.
     show_at_cursor: bool,
-    /// После выбора записи вернуть фокус прошлому окну и нажать Ctrl+V.
+    /// After picking an entry, hand focus back to the previous window and press Ctrl+V.
     auto_paste: bool,
-    /// Прятать окно после копирования (без вставки).
+    /// Hide the window after a copy (when auto-paste is off).
     hide_after_copy: bool,
     capture_text: bool,
     capture_images: bool,
-    /// Оформление: тёмное, светлое или «как в системе».
+    /// Dark, light, or whatever Windows is set to.
     theme: ThemeChoice,
 }
 
-/// Выбор темы. Отдельно от `egui::ThemePreference`, чтобы формат
-/// `settings.json` не зависел от serde-фич egui.
+/// Kept separate from `egui::ThemePreference` so the format of `settings.json`
+/// doesn't ride on egui's serde feature flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ThemeChoice {
@@ -129,7 +138,7 @@ impl Default for AppSettings {
     }
 }
 
-// ---------- иконка ----------
+// ---------- icon ----------
 
 fn decode_icon() -> (Vec<u8>, u32, u32) {
     let image = image::load_from_memory(ICON_PNG)
@@ -139,10 +148,10 @@ fn decode_icon() -> (Vec<u8>, u32, u32) {
     (image.into_raw(), width, height)
 }
 
-// ---------- тема оформления ----------
+// ---------- theme ----------
 
-/// Оформление для одной из тем: скруглённые углы и один акцентный цвет.
-/// Тёмной задаём собственную палитру, светлой хватает стандартной egui-шной.
+/// Rounded corners and a single accent colour. The dark theme gets its own
+/// palette; for light, egui's defaults are good enough.
 fn build_visuals(theme: egui::Theme, accent: Color32) -> egui::Visuals {
     let mut visuals = theme.default_visuals();
 
@@ -172,11 +181,12 @@ fn build_visuals(theme: egui::Theme, accent: Color32) -> egui::Visuals {
     visuals
 }
 
-/// Регистрирует оформление обеих тем и включает выбранную.
+/// Registers visuals for both themes, then switches to the chosen one.
 ///
-/// Одного `set_visuals` мало: он пишет в стиль *текущей* темы, а eframe затем
-/// присылает системную тему и переключается на её нетронутый стиль — из-за
-/// этого приложение открывалось светлым на светлой Windows.
+/// `set_visuals` on its own isn't enough: it writes into the style of the
+/// *current* theme, and eframe later reports the system theme and swaps to that
+/// theme's untouched style. That's why the window used to come up light on a
+/// light Windows.
 fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
     ctx.set_visuals_of(egui::Theme::Dark, build_visuals(egui::Theme::Dark, ACCENT));
     ctx.set_visuals_of(
@@ -184,18 +194,18 @@ fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
         build_visuals(egui::Theme::Light, ACCENT),
     );
     ctx.set_theme(choice.preference());
-    // Панели текущего кадра уже нарисованы старым стилем, а нового события не
-    // будет — без явного запроса окно так и застынет наполовину перекрашенным.
+    // Panels for this frame were already drawn with the old style, and nothing
+    // else is going to wake the loop, so ask for one more pass.
     ctx.request_repaint();
 }
 
-// ---------- приложение ----------
+// ---------- app ----------
 
 fn main() -> eframe::Result<()> {
     let (rgba, width, height) = decode_icon();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(APP_TITLE)
+            .with_title(SYSTEM_TITLE)
             .with_inner_size([760.0, 480.0])
             .with_min_inner_size([520.0, 320.0])
             .with_icon(egui::IconData {
@@ -220,20 +230,19 @@ struct App {
     store: Arc<Mutex<HistoryStore>>,
     watcher: WatcherHandle,
     selected: Option<u64>,
-    /// Отмеченные чекбоксами записи для массового удаления.
+    /// Entries ticked for bulk delete.
     checked: HashSet<u64>,
-    /// Кэш превью для выбранного элемента: id → (текст ИЛИ RGBA-текстура).
+    /// Preview of the selected entry: either its text or an RGBA texture.
     preview: PreviewCache,
-    /// Черновик значения «Хранить записей»: пока пользователь печатает,
-    /// в настройки ничего не пишем — иначе промежуточные «1», «10» тут же
-    /// подрезали бы историю.
+    /// Draft of the "keep N entries" field. Nothing lands in the settings while
+    /// the user is still typing, or a half-typed "1" would trim the history.
     max_items_input: String,
     hotkey_input: String,
     autostart_enabled: bool,
     settings_open: bool,
     search: String,
     hotkeys: Option<hotkey::HotkeyService>,
-    /// Окно, активное до вызова CopyCat, — цель автовставки.
+    /// Window that was active before CopyCat came up: where auto-paste sends text.
     prev_window: isize,
 }
 
@@ -346,7 +355,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
-    /// Синхронизирует лимит истории с watcher-ом и подрезает уже накопленное.
+    /// Pushes the new limit to the watcher and trims what's already stored.
     fn apply_max_items(&mut self) {
         self.watcher
             .max_items
@@ -357,8 +366,8 @@ impl App {
         }
     }
 
-    /// Ленивая загрузка превью для выбранного элемента; повторный `ui`-кадр
-    /// не декодирует картинку заново.
+    /// Loads the preview once per selection, so redrawing doesn't decode the
+    /// image again on every frame.
     fn ensure_preview(&mut self, ctx: &egui::Context, item: &ClipItem) {
         if self.preview.id == Some(item.id) {
             return;
@@ -411,7 +420,7 @@ fn build_tray(
 
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip(APP_TITLE)
+        .with_tooltip(SYSTEM_TITLE)
         .with_icon(icon)
         .build()
         .expect("build tray icon");
@@ -422,10 +431,10 @@ fn build_tray(
         if event.id == show_id {
             show_from_menu.store(true, Ordering::Relaxed);
         } else if event.id == quit_id {
-            // Выходим прямо здесь: со спрятанным окном winit не гоняет кадры,
-            // поэтому флаг + request_repaint читались бы только после того,
-            // как цикл разбудит какое-нибудь стороннее событие.
-            // Лок гарантирует, что фоновой поток не пишет индекс прямо сейчас.
+            // Exit right here. With the window hidden winit runs no frames, so a
+            // flag plus request_repaint would sit unread until some unrelated event
+            // woke the loop. Taking the lock first makes sure the background thread
+            // isn't halfway through writing the index.
             if let Ok(s) = store.lock() {
                 s.save_index();
             }
@@ -448,8 +457,8 @@ fn build_tray(
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Хоткей: запоминаем активное окно ДО показа своего — потом фокус
-        // уже наш, и вставлять будет некуда.
+        // Grab the active window before showing ours: a moment later the focus is
+        // ours and there is nothing left to paste into.
         if self.hotkeys.as_ref().is_some_and(|h| h.take_trigger()) {
             self.prev_window = paste::foreground_window();
             if self.settings.show_at_cursor {
@@ -465,13 +474,13 @@ impl eframe::App for App {
             self.prev_window = paste::foreground_window();
             Self::show_window(ctx);
         }
-        // Escape прячет окно — привычное поведение для вызываемых по хоткею
-        // палитр; приложение при этом остаётся жить в трее.
+        // Escape hides the window, the way any hotkey-summoned palette behaves.
+        // The app itself keeps running in the tray.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
-        // Крестик окна прячет приложение в трей, а не закрывает — выход
-        // делается только через пункт меню в трее.
+        // The close button hides to tray rather than quitting. Quitting is the
+        // tray menu item and nothing else.
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -481,7 +490,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // ---------- top bar с настройками ----------
+        // ---------- top bar ----------
         let mut delete_all_checked = false;
         egui::Panel::top("top_bar")
             .frame(
@@ -497,6 +506,15 @@ impl eframe::App for App {
                     )));
                     ui.add_space(8.0);
                     ui.heading(RichText::new(APP_TITLE).strong());
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(APP_VERSION)
+                            .small()
+                            .monospace()
+                            .color(ACCENT.linear_multiply(2.0)),
+                    )
+                    .on_hover_text(format!("{SYSTEM_TITLE}\n{VENDOR}"));
+                    ui.hyperlink_to(RichText::new(format!("by {}", VENDOR)).size(13.0), REPO_URL);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Настройки").clicked() {
@@ -525,7 +543,7 @@ impl eframe::App for App {
                 });
             });
 
-        // ---------- готовим данные под панели ----------
+        // ---------- data for the panels ----------
         let all_items: Vec<ClipItem> = self
             .store
             .lock()
@@ -539,7 +557,7 @@ impl eframe::App for App {
             self.preview = PreviewCache::default();
         }
 
-        // Закреплённые всегда сверху, внутри групп — порядок хранилища (новые выше).
+        // Pinned entries on top; within each group, storage order (newest first).
         let query = self.search.trim().to_lowercase();
         let mut items: Vec<ClipItem> = all_items
             .iter()
@@ -548,7 +566,7 @@ impl eframe::App for App {
             .collect();
         items.sort_by_key(|it| !it.pinned);
 
-        // ---------- список слева ----------
+        // ---------- list ----------
         let mut requested_copy: Option<u64> = None;
         let mut requested_delete: Option<u64> = None;
         let mut requested_pin: Option<u64> = None;
@@ -632,7 +650,7 @@ impl eframe::App for App {
                     });
             });
 
-        // ---------- превью ----------
+        // ---------- preview ----------
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -736,7 +754,7 @@ impl eframe::App for App {
 
         self.settings_window(&ctx);
 
-        // ---------- отложенные действия из UI-цикла ----------
+        // ---------- actions deferred out of the ui pass ----------
         if let Some(id) = requested_copy {
             self.copy_item(&ctx, id);
         }
@@ -750,7 +768,7 @@ impl eframe::App for App {
             let ids: Vec<u64> = self.checked.iter().copied().collect();
             self.delete_ids(&ids);
         }
-        // Delete удаляет отмеченные, а если их нет — просто выбранную запись.
+        // Delete removes the ticked entries, or the selected one if none are ticked.
         if ctx.input(|i| i.key_pressed(egui::Key::Delete)) && !ctx.egui_wants_keyboard_input() {
             if !self.checked.is_empty() {
                 let ids: Vec<u64> = self.checked.iter().copied().collect();
@@ -763,13 +781,13 @@ impl eframe::App for App {
 }
 
 struct RowResponse {
-    /// Клик по карточке вне зоны чекбокса — «выбрать для превью».
+    /// Click on the card, away from the checkbox: select it for preview.
     row_clicked: bool,
-    /// Двойной клик — сразу скопировать (и вставить, если включено).
+    /// Double click: copy straight away, and paste too if that's enabled.
     row_double_clicked: bool,
 }
 
-/// Совпадение записи с поисковым запросом (запрос уже в нижнем регистре).
+/// Whether an entry matches the search query. The query is already lowercased.
 fn item_matches(item: &ClipItem, query: &str) -> bool {
     match item.kind {
         ItemKind::Text => item
@@ -786,8 +804,8 @@ fn item_matches(item: &ClipItem, query: &str) -> bool {
     }
 }
 
-/// Максимальная длина заголовка карточки в символах. Полный текст показывается
-/// в тултипе и в правом превью, здесь задача — не дать UI разъезжаться.
+/// How many characters of a title a card shows. The full text is in the preview
+/// pane; the cap is only here to stop long lines from stretching the list.
 const MAX_TITLE_CHARS: usize = 32;
 
 fn truncate_chars(s: &str, max: usize) -> String {
@@ -861,9 +879,9 @@ fn draw_list_row(
             });
         });
 
-    // Хит-тест руками по прямоугольнику карточки. Через обычный `interact`
-    // клик перехватывали вложенные Label'ы (они сенсят hover ради тултипов),
-    // из-за чего верхняя половина строки не реагировала на выбор.
+    // Hit test the card rect by hand. With a plain `interact` the nested labels
+    // stole the click (they sense hover for their tooltips), which left the top
+    // half of a row dead to selection.
     let card_rect = card.response.rect;
     let pointer = ui.input(|i| i.pointer.interact_pos());
     let inside = pointer.is_some_and(|p| card_rect.contains(p) && !checkbox_rect.contains(p));
@@ -923,8 +941,8 @@ impl App {
         }
     }
 
-    /// Отдельное окно настроек: в поповере `menu_button` поля ввода
-    /// закрывались от первого же клика.
+    /// Settings get their own window: inside a `menu_button` popover the text
+    /// fields closed on the very first click.
     fn settings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         egui::Window::new("Настройки")
@@ -1083,6 +1101,22 @@ impl App {
                         }
                     }
                 }
+
+                // ui.add_space(10.0);
+                // ui.separator();
+                // ui.horizontal(|ui| {
+                //     let weak = ui.visuals().weak_text_color();
+                //     ui.label(
+                //         RichText::new(format!("{APP_TITLE} {APP_VERSION}"))
+                //             .size(13.0)
+                //             .monospace()
+                //             .color(weak),
+                //     );
+                //     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                //         ui.hyperlink_to(RichText::new(VENDOR).size(13.0), REPO_URL);
+                //         ui.label(RichText::new("created by").size(13.0).color(weak));
+                //     });
+                // });
             });
         self.settings_open = open;
     }

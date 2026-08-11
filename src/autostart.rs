@@ -1,7 +1,7 @@
-//! Автозапуск на Windows через `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+//! Start with Windows, via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 //!
-//! На других платформах функции-заглушки возвращают `false` / `Ok(())`, чтобы
-//! галочка в UI просто ничего не делала (галочки там нет, но unified API).
+//! Elsewhere the stubs return `false` / `Ok(())` so callers don't need their own
+//! `cfg` branches.
 
 #[cfg(windows)]
 mod imp {
@@ -24,7 +24,7 @@ mod imp {
         let key = hkcu.open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)?;
         if enable {
             let exe = std::env::current_exe()?;
-            // Кавычки нужны, иначе пробелы в пути ломают команду.
+            // Quoted, or a space anywhere in the path breaks the command.
             let value = format!("\"{}\"", exe.to_string_lossy());
             key.set_value(VALUE_NAME, &value)?;
         } else {

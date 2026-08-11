@@ -1,5 +1,5 @@
-//! Глобальный хоткей показа окна. Строка вида `Ctrl+Shift+V` разбирается
-//! `global_hotkey`, поэтому пользователь настраивает комбинацию текстом.
+//! Global shortcut that shows the window. `global_hotkey` parses strings like
+//! `Ctrl+Shift+V`, so the combination can be configured as plain text.
 
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
@@ -11,7 +11,7 @@ pub struct HotkeyService {
     manager: GlobalHotKeyManager,
     registered: Option<HotKey>,
     triggered: Arc<AtomicBool>,
-    /// Текст последней ошибки регистрации — показывается в настройках.
+    /// Last registration error, shown in the settings window.
     pub error: Option<String>,
 }
 
@@ -22,7 +22,7 @@ impl HotkeyService {
 
         let flag = triggered.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
-            // Реагируем только на нажатие, иначе окно дёргалось бы дважды.
+            // Press only: reacting to the release too would show the window twice.
             if event.state == HotKeyState::Pressed {
                 flag.store(true, Ordering::Relaxed);
                 ctx.request_repaint();
@@ -37,7 +37,7 @@ impl HotkeyService {
         })
     }
 
-    /// Перерегистрирует комбинацию. `None` — выключить хоткей совсем.
+    /// Re-registers the combination. `None` turns the shortcut off entirely.
     pub fn apply(&mut self, spec: Option<&str>) {
         if let Some(old) = self.registered.take() {
             let _ = self.manager.unregister(old);
@@ -54,7 +54,7 @@ impl HotkeyService {
         };
         match self.manager.register(hotkey) {
             Ok(()) => self.registered = Some(hotkey),
-            // Чаще всего — комбинация уже занята другим приложением.
+            // Usually means another app already owns the combination.
             Err(exc) => self.error = Some(format!("не зарегистрировать «{spec}»: {exc}")),
         }
     }

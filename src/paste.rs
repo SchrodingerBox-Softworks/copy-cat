@@ -1,10 +1,10 @@
-//! Возврат фокуса в предыдущее окно и автоматическая вставка (Ctrl+V).
+//! Handing focus back to the previous window and pasting into it with Ctrl+V.
 //!
-//! HWND хранится как `isize`, чтобы его можно было спокойно держать в полях
-//! приложения и передавать в поток (сырой указатель не `Send`).
+//! The HWND is carried around as an `isize`: a raw pointer isn't `Send`, and this
+//! one has to live in the app struct and cross into a thread.
 
-/// Окно, которое было активно до того, как пользователь позвал CopyCat.
-/// Снимается в момент срабатывания хоткея — позже фокус уже наш.
+/// The window that was active before the user called CopyCat up. Read the
+/// moment the hotkey fires, since by the next frame the focus is ours.
 #[cfg(windows)]
 pub fn foreground_window() -> isize {
     use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -21,10 +21,10 @@ pub fn cursor_pos() -> Option<(i32, i32)> {
     (ok != 0).then_some((point.x, point.y))
 }
 
-/// Возвращает фокус окну `hwnd` и шлёт ему Ctrl+V.
+/// Gives focus back to `hwnd` and sends it Ctrl+V.
 ///
-/// Работает в отдельном потоке с паузами: Windows не отдаёт фокус мгновенно,
-/// а вставка в ещё не активированное окно уходит в пустоту.
+/// Runs on its own thread with pauses in between: Windows doesn't hand over focus
+/// instantly, and keystrokes sent to a window that isn't active yet go nowhere.
 #[cfg(windows)]
 pub fn restore_and_paste(hwnd: isize) {
     use std::thread;
