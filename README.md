@@ -1,3 +1,5 @@
+[![Made with Rust](https://forthebadge.com/images/badges/made-with-rust.svg)](https://www.rust-lang.org)
+
 <div align="center">
 
 <img src="assets/icon.png" alt="CopyCat" width="96">
@@ -18,15 +20,13 @@
 
 </div>
 
-[![Made with Rust](https://forthebadge.com/images/badges/made-with-rust.svg)](https://www.rust-lang.org)
 
 ---
 
 ## Что это
 
-В Windows есть своя история буфера обмена по `Win+V`, но она хранит только текст,
-не умеет искать и синхронизируется с облаком. CopyCat делает то же самое локально,
-обычными файлами рядом с `.exe`.
+В Windows есть своя история буфера обмена по `Win+V`, но она не умеет искать и синхронизируется с облаком.
+CopyCat делает то же самое локально, обычными файлами рядом с `.exe`.
 
 - Ловит и текст, и картинки. Скриншот из `Win+Shift+S` попадёт в историю так же, как строка из `Ctrl+C`.
 - `Ctrl+Shift+V` открывает окно у курсора. Комбинацию можно поменять.
