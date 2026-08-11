@@ -59,7 +59,11 @@ impl HistoryStore {
             .and_then(|t| serde_json::from_str::<StoredIndex>(&t).ok())
             .map(|idx| (idx.next_id.max(1), idx.items))
             .unwrap_or((1, Vec::new()));
-        Self { dir, next_id, items }
+        Self {
+            dir,
+            next_id,
+            items,
+        }
     }
 
     pub fn items(&self) -> &[ClipItem] {
@@ -80,7 +84,10 @@ impl HistoryStore {
 
     pub fn save_index(&self) {
         let path = self.dir.join("index.json");
-        let payload = StoredIndex { next_id: self.next_id, items: self.items.clone() };
+        let payload = StoredIndex {
+            next_id: self.next_id,
+            items: self.items.clone(),
+        };
         if let Ok(text) = serde_json::to_string_pretty(&payload) {
             let _ = std::fs::write(path, text);
         }
@@ -95,16 +102,19 @@ impl HistoryStore {
         let path = self.payload_path(id, "txt");
         std::fs::write(&path, text).ok()?;
         let snippet: String = text.chars().take(200).collect();
-        self.items.insert(0, ClipItem {
-            id,
-            kind: ItemKind::Text,
-            timestamp: now_secs(),
-            size_bytes: text.len() as u64,
-            hash,
-            snippet: Some(snippet),
-            image_dims: None,
-            pinned: false,
-        });
+        self.items.insert(
+            0,
+            ClipItem {
+                id,
+                kind: ItemKind::Text,
+                timestamp: now_secs(),
+                size_bytes: text.len() as u64,
+                hash,
+                snippet: Some(snippet),
+                image_dims: None,
+                pinned: false,
+            },
+        );
         Some(id)
     }
 
@@ -117,20 +127,30 @@ impl HistoryStore {
         let path = self.payload_path(id, "png");
         let mut png = Vec::new();
         PngEncoder::new(&mut png)
-            .write_image(&image.bytes, image.width as u32, image.height as u32, ExtendedColorType::Rgba8)
+            .write_image(
+                &image.bytes,
+                image.width as u32,
+                image.height as u32,
+                ExtendedColorType::Rgba8,
+            )
             .ok()?;
         std::fs::write(&path, &png).ok()?;
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(png.len() as u64);
-        self.items.insert(0, ClipItem {
-            id,
-            kind: ItemKind::Image,
-            timestamp: now_secs(),
-            size_bytes: size,
-            hash,
-            snippet: None,
-            image_dims: Some((image.width as u32, image.height as u32)),
-            pinned: false,
-        });
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or(png.len() as u64);
+        self.items.insert(
+            0,
+            ClipItem {
+                id,
+                kind: ItemKind::Image,
+                timestamp: now_secs(),
+                size_bytes: size,
+                hash,
+                snippet: None,
+                image_dims: Some((image.width as u32, image.height as u32)),
+                pinned: false,
+            },
+        );
         Some(id)
     }
 
@@ -146,7 +166,9 @@ impl HistoryStore {
     }
 
     pub fn delete(&mut self, id: u64) {
-        let Some(pos) = self.items.iter().position(|it| it.id == id) else { return };
+        let Some(pos) = self.items.iter().position(|it| it.id == id) else {
+            return;
+        };
         let it = self.items.remove(pos);
         let _ = std::fs::remove_file(self.payload_path(id, ext_for(it.kind)));
     }
@@ -155,7 +177,9 @@ impl HistoryStore {
     /// пропускаются — они живут, пока их не открепят или не удалят вручную.
     pub fn trim_to(&mut self, max_items: usize) {
         while self.items.len() > max_items {
-            let Some(pos) = self.items.iter().rposition(|it| !it.pinned) else { break };
+            let Some(pos) = self.items.iter().rposition(|it| !it.pinned) else {
+                break;
+            };
             let it = self.items.remove(pos);
             let _ = std::fs::remove_file(self.payload_path(it.id, ext_for(it.kind)));
         }
@@ -176,7 +200,10 @@ fn ext_for(kind: ItemKind) -> &'static str {
 }
 
 pub fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn format_ago(ts: u64) -> String {
@@ -315,7 +342,9 @@ fn try_capture_once(
 }
 
 pub fn copy_text_to_clipboard(text: &str, last_seen_hash: &AtomicU64) -> bool {
-    let Ok(mut cb) = Clipboard::new() else { return false };
+    let Ok(mut cb) = Clipboard::new() else {
+        return false;
+    };
     if cb.set_text(text).is_err() {
         return false;
     }
@@ -323,8 +352,15 @@ pub fn copy_text_to_clipboard(text: &str, last_seen_hash: &AtomicU64) -> bool {
     true
 }
 
-pub fn copy_image_to_clipboard(rgba: Vec<u8>, width: u32, height: u32, last_seen_hash: &AtomicU64) -> bool {
-    let Ok(mut cb) = Clipboard::new() else { return false };
+pub fn copy_image_to_clipboard(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+    last_seen_hash: &AtomicU64,
+) -> bool {
+    let Ok(mut cb) = Clipboard::new() else {
+        return false;
+    };
     let hash = fnv1a(&rgba);
     let img = ImageData {
         width: width as usize,
@@ -337,4 +373,3 @@ pub fn copy_image_to_clipboard(rgba: Vec<u8>, width: u32, height: u32, last_seen
     last_seen_hash.store(hash, Ordering::Relaxed);
     true
 }
-

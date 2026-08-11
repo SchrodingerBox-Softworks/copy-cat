@@ -40,8 +40,12 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn is_enabled() -> bool { false }
-    pub fn set(_enable: bool) -> std::io::Result<()> { Ok(()) }
+    pub fn is_enabled() -> bool {
+        false
+    }
+    pub fn set(_enable: bool) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub use imp::{is_enabled, set};

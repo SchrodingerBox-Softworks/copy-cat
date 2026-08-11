@@ -29,7 +29,12 @@ impl HotkeyService {
             }
         }));
 
-        Some(Self { manager, registered: None, triggered, error: None })
+        Some(Self {
+            manager,
+            registered: None,
+            triggered,
+            error: None,
+        })
     }
 
     /// Перерегистрирует комбинацию. `None` — выключить хоткей совсем.

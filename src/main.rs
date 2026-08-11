@@ -1,15 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, CornerRadius, RichText};
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon as TrayImgIcon, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 
 mod autostart;
@@ -18,8 +18,8 @@ mod hotkey;
 mod paste;
 
 use buffer::{
-    copy_image_to_clipboard, copy_text_to_clipboard, format_ago, spawn_watcher, ClipItem, HistoryStore,
-    ItemKind, WatcherHandle,
+    ClipItem, HistoryStore, ItemKind, WatcherHandle, copy_image_to_clipboard,
+    copy_text_to_clipboard, format_ago, spawn_watcher,
 };
 
 const ACCENT: Color32 = Color32::PURPLE;
@@ -47,8 +47,10 @@ fn load_json<T: Serialize + DeserializeOwned>(path: &Path, default: T) -> T {
         std::fs::write(path, text).expect("write default config");
         return default;
     }
-    let text = std::fs::read_to_string(path).unwrap_or_else(|exc| panic!("failed to read {}: {exc}", path.display()));
-    serde_json::from_str(&text).unwrap_or_else(|exc| panic!("failed to parse {}: {exc}", path.display()))
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|exc| panic!("failed to read {}: {exc}", path.display()));
+    serde_json::from_str(&text)
+        .unwrap_or_else(|exc| panic!("failed to parse {}: {exc}", path.display()))
 }
 
 /// Сохраняет значение как отформатированный JSON
@@ -98,7 +100,9 @@ impl Default for AppSettings {
 // ---------- иконка ----------
 
 fn decode_icon() -> (Vec<u8>, u32, u32) {
-    let image = image::load_from_memory(ICON_PNG).expect("decode embedded icon").into_rgba8();
+    let image = image::load_from_memory(ICON_PNG)
+        .expect("decode embedded icon")
+        .into_rgba8();
     let (width, height) = image.dimensions();
     (image.into_raw(), width, height)
 }
@@ -142,10 +146,18 @@ fn main() -> eframe::Result<()> {
             .with_title(APP_TITLE)
             .with_inner_size([760.0, 480.0])
             .with_min_inner_size([520.0, 320.0])
-            .with_icon(egui::IconData { rgba, width, height }),
+            .with_icon(egui::IconData {
+                rgba,
+                width,
+                height,
+            }),
         ..Default::default()
     };
-    eframe::run_native("schrodingerbox-copycat", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native(
+        "schrodingerbox-copycat",
+        options,
+        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+    )
 }
 
 struct App {
@@ -185,18 +197,37 @@ impl App {
         cc.egui_ctx.set_visuals(build_visuals(ACCENT));
 
         let (rgba, width, height) = decode_icon();
-        let color_image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
-        let icon_texture = cc.egui_ctx.load_texture("app_icon", color_image, egui::TextureOptions::LINEAR);
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+        let icon_texture =
+            cc.egui_ctx
+                .load_texture("app_icon", color_image, egui::TextureOptions::LINEAR);
 
         let settings: AppSettings = load_json(&settings_path(), AppSettings::default());
         let store = Arc::new(Mutex::new(HistoryStore::open(base_dir().join("clipboard"))));
 
         let show_requested = Arc::new(AtomicBool::new(false));
-        let tray = build_tray(&cc.egui_ctx, rgba, width, height, show_requested.clone(), store.clone());
+        let tray = build_tray(
+            &cc.egui_ctx,
+            rgba,
+            width,
+            height,
+            show_requested.clone(),
+            store.clone(),
+        );
 
-        let watcher = spawn_watcher(store.clone(), cc.egui_ctx.clone(), settings.poll_interval_ms, settings.max_items);
-        watcher.capture_text.store(settings.capture_text, Ordering::Relaxed);
-        watcher.capture_images.store(settings.capture_images, Ordering::Relaxed);
+        let watcher = spawn_watcher(
+            store.clone(),
+            cc.egui_ctx.clone(),
+            settings.poll_interval_ms,
+            settings.max_items,
+        );
+        watcher
+            .capture_text
+            .store(settings.capture_text, Ordering::Relaxed);
+        watcher
+            .capture_images
+            .store(settings.capture_images, Ordering::Relaxed);
 
         let mut hotkeys = hotkey::HotkeyService::new(cc.egui_ctx.clone());
         if let Some(service) = hotkeys.as_mut() {
@@ -266,7 +297,9 @@ impl App {
 
     /// Синхронизирует лимит истории с watcher-ом и подрезает уже накопленное.
     fn apply_max_items(&mut self) {
-        self.watcher.max_items.store(self.settings.max_items, Ordering::Relaxed);
+        self.watcher
+            .max_items
+            .store(self.settings.max_items, Ordering::Relaxed);
         if let Ok(mut s) = self.store.lock() {
             s.trim_to(self.settings.max_items);
             s.save_index();
@@ -279,7 +312,11 @@ impl App {
         if self.preview.id == Some(item.id) {
             return;
         }
-        self.preview = PreviewCache { id: Some(item.id), text: None, image: None };
+        self.preview = PreviewCache {
+            id: Some(item.id),
+            text: None,
+            image: None,
+        };
         let store = self.store.lock().expect("store lock");
         match item.kind {
             ItemKind::Text => {
@@ -287,8 +324,13 @@ impl App {
             }
             ItemKind::Image => {
                 if let Some((rgba, w, h)) = store.load_image_rgba(item.id) {
-                    let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-                    let tex = ctx.load_texture(format!("preview_{}", item.id), img, egui::TextureOptions::LINEAR);
+                    let img =
+                        egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+                    let tex = ctx.load_texture(
+                        format!("preview_{}", item.id),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
                     self.preview.image = Some((tex, w, h));
                 }
             }
@@ -312,7 +354,8 @@ fn build_tray(
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
     menu.append(&show_item).expect("append show item");
-    menu.append(&PredefinedMenuItem::separator()).expect("append separator");
+    menu.append(&PredefinedMenuItem::separator())
+        .expect("append separator");
     menu.append(&quit_item).expect("append quit item");
 
     let tray = TrayIconBuilder::new()
@@ -361,8 +404,7 @@ impl eframe::App for App {
             if self.settings.show_at_cursor {
                 if let Some((x, y)) = paste::cursor_pos() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
-                        x as f32,
-                        y as f32,
+                        x as f32, y as f32,
                     )));
                 }
             }
@@ -391,10 +433,17 @@ impl eframe::App for App {
         // ---------- top bar с настройками ----------
         let mut delete_all_checked = false;
         egui::Panel::top("top_bar")
-            .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::symmetric(16, 10)))
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(16, 10)),
+            )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::Image::new((self.icon_texture.id(), egui::vec2(22.0, 22.0))));
+                    ui.add(egui::Image::new((
+                        self.icon_texture.id(),
+                        egui::vec2(22.0, 22.0),
+                    )));
                     ui.add_space(8.0);
                     ui.heading(RichText::new(APP_TITLE).strong());
 
@@ -404,11 +453,17 @@ impl eframe::App for App {
                         }
 
                         let count = self.store.lock().map(|s| s.items().len()).unwrap_or(0);
-                        ui.label(RichText::new(format!("{count} шт.")).color(ui.visuals().weak_text_color()));
+                        ui.label(
+                            RichText::new(format!("{count} шт."))
+                                .color(ui.visuals().weak_text_color()),
+                        );
 
                         if !self.checked.is_empty() {
                             let label = format!("Удалить выбранные ({})", self.checked.len());
-                            if ui.button(RichText::new(label).color(Color32::WHITE)).clicked() {
+                            if ui
+                                .button(RichText::new(label).color(Color32::WHITE))
+                                .clicked()
+                            {
                                 delete_all_checked = true;
                             }
                             if ui.button("Снять выделение").clicked() {
@@ -420,8 +475,15 @@ impl eframe::App for App {
             });
 
         // ---------- готовим данные под панели ----------
-        let all_items: Vec<ClipItem> = self.store.lock().map(|s| s.items().to_vec()).unwrap_or_default();
-        if self.selected.map_or(false, |id| !all_items.iter().any(|it| it.id == id)) {
+        let all_items: Vec<ClipItem> = self
+            .store
+            .lock()
+            .map(|s| s.items().to_vec())
+            .unwrap_or_default();
+        if self
+            .selected
+            .map_or(false, |id| !all_items.iter().any(|it| it.id == id))
+        {
             self.selected = None;
             self.preview = PreviewCache::default();
         }
@@ -443,7 +505,11 @@ impl eframe::App for App {
             .resizable(true)
             .default_size(280.0)
             .size_range(200.0..=380.0)
-            .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::same(8)))
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::same(8)),
+            )
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut self.search)
@@ -455,16 +521,26 @@ impl eframe::App for App {
                 if all_items.is_empty() {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("История пуста").color(ui.visuals().weak_text_color()));
-                        ui.label(RichText::new("Скопируйте что-нибудь (Ctrl+C, Win+Shift+S) — появится здесь.")
-                            .color(ui.visuals().weak_text_color()).small());
+                        ui.label(
+                            RichText::new("История пуста").color(ui.visuals().weak_text_color()),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Скопируйте что-нибудь (Ctrl+C, Win+Shift+S) — появится здесь.",
+                            )
+                            .color(ui.visuals().weak_text_color())
+                            .small(),
+                        );
                     });
                     return;
                 }
                 if items.is_empty() {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new("Ничего не найдено").color(ui.visuals().weak_text_color()));
+                        ui.label(
+                            RichText::new("Ничего не найдено")
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     });
                     return;
                 }
@@ -482,62 +558,89 @@ impl eframe::App for App {
                 });
                 ui.separator();
 
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    for item in &items {
-                        let selected = self.selected == Some(item.id);
-                        let mut checked = self.checked.contains(&item.id);
-                        let response = draw_list_row(ui, item, selected, &mut checked);
-                        if checked {
-                            self.checked.insert(item.id);
-                        } else {
-                            self.checked.remove(&item.id);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        for item in &items {
+                            let selected = self.selected == Some(item.id);
+                            let mut checked = self.checked.contains(&item.id);
+                            let response = draw_list_row(ui, item, selected, &mut checked);
+                            if checked {
+                                self.checked.insert(item.id);
+                            } else {
+                                self.checked.remove(&item.id);
+                            }
+                            if response.row_clicked {
+                                self.selected = Some(item.id);
+                            }
+                            if response.row_double_clicked {
+                                requested_copy = Some(item.id);
+                            }
                         }
-                        if response.row_clicked {
-                            self.selected = Some(item.id);
-                        }
-                        if response.row_double_clicked {
-                            requested_copy = Some(item.id);
-                        }
-                    }
-                });
+                    });
             });
 
         // ---------- превью ----------
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(ui.visuals().extreme_bg_color).inner_margin(egui::Margin::same(16)))
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().extreme_bg_color)
+                    .inner_margin(egui::Margin::same(16)),
+            )
             .show(ui, |ui| {
                 let Some(id) = self.selected else {
                     ui.vertical_centered(|ui| {
                         ui.add_space(24.0);
-                        ui.label(RichText::new("Выберите запись слева").color(ui.visuals().weak_text_color()));
+                        ui.label(
+                            RichText::new("Выберите запись слева")
+                                .color(ui.visuals().weak_text_color()),
+                        );
                     });
                     return;
                 };
-                let Some(item) = items.iter().find(|it| it.id == id).cloned() else { return };
+                let Some(item) = items.iter().find(|it| it.id == id).cloned() else {
+                    return;
+                };
                 self.ensure_preview(&ctx, &item);
 
                 ui.horizontal(|ui| {
                     let title = match item.kind {
                         ItemKind::Text => format!("Текст · {} B", item.size_bytes),
                         ItemKind::Image => match item.image_dims {
-                            Some((w, h)) => format!("Картинка · {w}×{h} · {} КБ", item.size_bytes / 1024),
+                            Some((w, h)) => {
+                                format!("Картинка · {w}×{h} · {} КБ", item.size_bytes / 1024)
+                            }
                             None => "Картинка".to_string(),
                         },
                     };
                     ui.strong(title);
                     ui.add_space(12.0);
-                    ui.label(RichText::new(format_ago(item.timestamp)).color(ui.visuals().weak_text_color()));
+                    ui.label(
+                        RichText::new(format_ago(item.timestamp))
+                            .color(ui.visuals().weak_text_color()),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Удалить").clicked() {
                             requested_delete = Some(item.id);
                         }
-                        let pin_label = if item.pinned { "Открепить" } else { "Закрепить" };
+                        let pin_label = if item.pinned {
+                            "Открепить"
+                        } else {
+                            "Закрепить"
+                        };
                         if ui.button(pin_label).clicked() {
                             requested_pin = Some(item.id);
                         }
-                        let copy_label = if self.settings.auto_paste { "Вставить" } else { "Копировать" };
-                        if ui.button(RichText::new(copy_label).color(Color32::WHITE)).clicked() {
+                        let copy_label = if self.settings.auto_paste {
+                            "Вставить"
+                        } else {
+                            "Копировать"
+                        };
+                        if ui
+                            .button(RichText::new(copy_label).color(Color32::WHITE))
+                            .clicked()
+                        {
                             requested_copy = Some(item.id);
                         }
                     });
@@ -546,25 +649,36 @@ impl eframe::App for App {
 
                 match item.kind {
                     ItemKind::Text => {
-                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                            if let Some(text) = &self.preview.text {
-                                ui.add(egui::Label::new(text).wrap());
-                            } else {
-                                ui.label(RichText::new("(не удалось прочитать файл)").color(ui.visuals().weak_text_color()));
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if let Some(text) = &self.preview.text {
+                                    ui.add(egui::Label::new(text).wrap());
+                                } else {
+                                    ui.label(
+                                        RichText::new("(не удалось прочитать файл)")
+                                            .color(ui.visuals().weak_text_color()),
+                                    );
+                                }
+                            });
                     }
                     ItemKind::Image => {
-                        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                            if let Some((tex, w, h)) = &self.preview.image {
-                                let avail = ui.available_size();
-                                let scale = (avail.x / *w as f32).min(avail.y / *h as f32).min(1.0);
-                                let size = egui::vec2(*w as f32 * scale, *h as f32 * scale);
-                                ui.add(egui::Image::new((tex.id(), size)));
-                            } else {
-                                ui.label(RichText::new("(не удалось декодировать PNG)").color(ui.visuals().weak_text_color()));
-                            }
-                        });
+                        egui::ScrollArea::both()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                if let Some((tex, w, h)) = &self.preview.image {
+                                    let avail = ui.available_size();
+                                    let scale =
+                                        (avail.x / *w as f32).min(avail.y / *h as f32).min(1.0);
+                                    let size = egui::vec2(*w as f32 * scale, *h as f32 * scale);
+                                    ui.add(egui::Image::new((tex.id(), size)));
+                                } else {
+                                    ui.label(
+                                        RichText::new("(не удалось декодировать PNG)")
+                                            .color(ui.visuals().weak_text_color()),
+                                    );
+                                }
+                            });
                     }
                 }
             });
@@ -607,9 +721,15 @@ struct RowResponse {
 /// Совпадение записи с поисковым запросом (запрос уже в нижнем регистре).
 fn item_matches(item: &ClipItem, query: &str) -> bool {
     match item.kind {
-        ItemKind::Text => item.snippet.as_deref().is_some_and(|s| s.to_lowercase().contains(query)),
+        ItemKind::Text => item
+            .snippet
+            .as_deref()
+            .is_some_and(|s| s.to_lowercase().contains(query)),
         ItemKind::Image => {
-            let dims = item.image_dims.map(|(w, h)| format!("{w}x{h} {w}×{h}")).unwrap_or_default();
+            let dims = item
+                .image_dims
+                .map(|(w, h)| format!("{w}x{h} {w}×{h}"))
+                .unwrap_or_default();
             "картинка image img".contains(query) || dims.contains(query)
         }
     }
@@ -620,7 +740,10 @@ fn item_matches(item: &ClipItem, query: &str) -> bool {
 const MAX_TITLE_CHARS: usize = 32;
 
 fn truncate_chars(s: &str, max: usize) -> String {
-    let normalized: String = s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+    let normalized: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
     if normalized.chars().count() <= max {
         return normalized;
     }
@@ -629,8 +752,17 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-fn draw_list_row(ui: &mut egui::Ui, item: &ClipItem, selected: bool, checked: &mut bool) -> RowResponse {
-    let fill = if selected { ACCENT.linear_multiply(0.25) } else { ui.visuals().faint_bg_color };
+fn draw_list_row(
+    ui: &mut egui::Ui,
+    item: &ClipItem,
+    selected: bool,
+    checked: &mut bool,
+) -> RowResponse {
+    let fill = if selected {
+        ACCENT.linear_multiply(0.25)
+    } else {
+        ui.visuals().faint_bg_color
+    };
 
     let row_width = ui.available_width();
     let mut checkbox_rect = egui::Rect::NOTHING;
@@ -685,15 +817,24 @@ fn draw_list_row(ui: &mut egui::Ui, item: &ClipItem, selected: bool, checked: &m
     let pointer = ui.input(|i| i.pointer.interact_pos());
     let inside = pointer.is_some_and(|p| card_rect.contains(p) && !checkbox_rect.contains(p));
     let row_clicked = inside && ui.input(|i| i.pointer.primary_clicked());
-    let row_double_clicked = inside && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+    let row_double_clicked = inside
+        && ui.input(|i| {
+            i.pointer
+                .button_double_clicked(egui::PointerButton::Primary)
+        });
 
     ui.add_space(4.0);
-    RowResponse { row_clicked, row_double_clicked }
+    RowResponse {
+        row_clicked,
+        row_double_clicked,
+    }
 }
 
 impl App {
     fn copy_item(&mut self, ctx: &egui::Context, id: u64) {
-        let Some(item) = self.store.lock().ok().and_then(|s| s.get(id).cloned()) else { return };
+        let Some(item) = self.store.lock().ok().and_then(|s| s.get(id).cloned()) else {
+            return;
+        };
         let copied = match item.kind {
             ItemKind::Text => self
                 .store
@@ -763,12 +904,22 @@ impl App {
                 });
 
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut self.settings.capture_text, "Ловить текст").changed() {
-                        self.watcher.capture_text.store(self.settings.capture_text, Ordering::Relaxed);
+                    if ui
+                        .checkbox(&mut self.settings.capture_text, "Ловить текст")
+                        .changed()
+                    {
+                        self.watcher
+                            .capture_text
+                            .store(self.settings.capture_text, Ordering::Relaxed);
                         self.save_settings();
                     }
-                    if ui.checkbox(&mut self.settings.capture_images, "Ловить картинки").changed() {
-                        self.watcher.capture_images.store(self.settings.capture_images, Ordering::Relaxed);
+                    if ui
+                        .checkbox(&mut self.settings.capture_images, "Ловить картинки")
+                        .changed()
+                    {
+                        self.watcher
+                            .capture_images
+                            .store(self.settings.capture_images, Ordering::Relaxed);
                         self.save_settings();
                     }
                 });
@@ -776,9 +927,14 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label("Опрос буфера, мс:");
                     let mut ms = self.settings.poll_interval_ms as f32;
-                    if ui.add(egui::Slider::new(&mut ms, 100.0..=2000.0).step_by(50.0)).changed() {
+                    if ui
+                        .add(egui::Slider::new(&mut ms, 100.0..=2000.0).step_by(50.0))
+                        .changed()
+                    {
                         self.settings.poll_interval_ms = ms as u64;
-                        self.watcher.poll_ms.store(self.settings.poll_interval_ms, Ordering::Relaxed);
+                        self.watcher
+                            .poll_ms
+                            .store(self.settings.poll_interval_ms, Ordering::Relaxed);
                         self.save_settings();
                     }
                 });
@@ -788,7 +944,10 @@ impl App {
                 ui.label(RichText::new("Горячая клавиша").strong());
 
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut self.settings.hotkey_enabled, "Включить").changed() {
+                    if ui
+                        .checkbox(&mut self.settings.hotkey_enabled, "Включить")
+                        .changed()
+                    {
                         self.reapply_hotkey();
                     }
                     let resp = ui.add(
@@ -815,22 +974,40 @@ impl App {
                 ui.label(RichText::new("Поведение").strong());
 
                 if ui
-                    .checkbox(&mut self.settings.auto_paste, "Вставлять сразу (Ctrl+V в прошлое окно)")
+                    .checkbox(
+                        &mut self.settings.auto_paste,
+                        "Вставлять сразу (Ctrl+V в прошлое окно)",
+                    )
                     .changed()
                 {
                     self.save_settings();
                 }
-                if ui.checkbox(&mut self.settings.hide_after_copy, "Прятать окно после копирования").changed() {
+                if ui
+                    .checkbox(
+                        &mut self.settings.hide_after_copy,
+                        "Прятать окно после копирования",
+                    )
+                    .changed()
+                {
                     self.save_settings();
                 }
-                if ui.checkbox(&mut self.settings.show_at_cursor, "Показывать окно у курсора").changed() {
+                if ui
+                    .checkbox(
+                        &mut self.settings.show_at_cursor,
+                        "Показывать окно у курсора",
+                    )
+                    .changed()
+                {
                     self.save_settings();
                 }
 
                 #[cfg(windows)]
                 {
                     let mut on = self.autostart_enabled;
-                    if ui.checkbox(&mut on, "Автозапуск при старте Windows").changed() {
+                    if ui
+                        .checkbox(&mut on, "Автозапуск при старте Windows")
+                        .changed()
+                    {
                         match autostart::set(on) {
                             Ok(()) => self.autostart_enabled = on,
                             Err(_) => self.autostart_enabled = autostart::is_enabled(),
@@ -850,4 +1027,3 @@ impl App {
         self.save_settings();
     }
 }
-

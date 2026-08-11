@@ -31,8 +31,8 @@ pub fn restore_and_paste(hwnd: isize) {
     use std::time::Duration;
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL, VK_V,
-        VIRTUAL_KEY,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+        VK_CONTROL, VK_V,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
@@ -67,7 +67,11 @@ pub fn restore_and_paste(hwnd: isize) {
             key(VK_CONTROL, true),
         ];
         unsafe {
-            SendInput(inputs.len() as u32, inputs.as_mut_ptr(), size_of::<INPUT>() as i32);
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_mut_ptr(),
+                size_of::<INPUT>() as i32,
+            );
         }
     });
 }
