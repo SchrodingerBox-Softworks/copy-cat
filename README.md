@@ -39,21 +39,31 @@ Windows умеет хранить историю буфера обмена (`Win
 
 ## Установка
 
-Скачайте `copy-cat-vX.Y.Z-x86_64-windows.exe` со страницы
-[**Releases**](https://github.com/SchrodingerBox-Softworks/copy-cat/releases/latest),
-положите в любую папку и запустите. Приложение свернётся в трей.
+Скачайте `copy-cat-vX.Y.Z-x86_64-windows.zip` со страницы
+[**Releases**](https://github.com/SchrodingerBox-Softworks/copy-cat/releases/latest)
+и распакуйте — внутри готовая папка:
+
+```
+copy-cat-vX.Y.Z\
+├─ copy-cat.exe
+├─ README.txt        # краткая инструкция
+└─ LICENSE.txt
+```
+
+Запустите `copy-cat.exe` — приложение свернётся в трей. Установка не нужна,
+удаление — удалить папку.
 
 > [!IMPORTANT]
-> Кладите `.exe` в папку, куда можно писать (например, `C:\Tools\CopyCat\`, а не `C:\Program Files\`) —
-> рядом с ним создаются `settings.json` и папка `clipboard/`.
+> Кладите папку туда, где есть право на запись (например, `C:\Tools\CopyCat\`,
+> а не `C:\Program Files\`) — рядом с `.exe` создаются `settings.json` и папка `clipboard/`.
 
 Проверить загрузку:
 
 ```powershell
-Get-FileHash .\copy-cat-vX.Y.Z-x86_64-windows.exe -Algorithm SHA256
+Get-FileHash .\copy-cat-vX.Y.Z-x86_64-windows.zip -Algorithm SHA256
 ```
 
-Хэш опубликован в описании релиза и в файле `.sha256`.
+Хэш опубликован в описании релиза.
 
 ## Как пользоваться
 

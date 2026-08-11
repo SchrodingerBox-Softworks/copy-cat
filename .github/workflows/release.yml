@@ -59,17 +59,38 @@ jobs:
           tail -n +2 TAG_MESSAGE.txt > TAG_BODY.txt
           echo "subject=$(cat TAG_SUBJECT.txt)" >> "$GITHUB_OUTPUT"
 
+      # Кладём в архив папку целиком: распаковал — и получил готовый каталог
+      # с exe, инструкцией и лицензией, никаких файлов россыпью.
       - name: Package artifacts
         id: package
-        shell: bash
+        shell: pwsh
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          ASSET="${BIN_NAME}-${TAG}-x86_64-windows.exe"
-          cp "target/release/${BIN_NAME}.exe" "$ASSET"
-          HASH=$(sha256sum "$ASSET" | awk '{print $1}')
-          echo "${HASH}  ${ASSET}" > "${ASSET}.sha256"
-          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
-          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+          $tag = $env:GITHUB_REF_NAME
+          $dir = "$env:BIN_NAME-$tag"
+          $asset = "$dir-x86_64-windows.zip"
+
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "target/release/$env:BIN_NAME.exe" "$dir/"
+          Copy-Item LICENSE "$dir/LICENSE.txt"
+
+          # README.txt для Блокнота: CRLF и UTF-8 с BOM, иначе кириллица
+          # в старых версиях Windows читается кракозябрами.
+          # Читаем через .NET, а не Get-Content: тот без BOM в файле принимает
+          # UTF-8 за ANSI и портит кириллицу ещё на входе.
+          $src = (Resolve-Path packaging/README.txt).Path
+          $readme = [System.IO.File]::ReadAllText($src) -replace '__VERSION__', $tag
+          $readme = ($readme -replace "`r`n", "`n") -replace "`n", "`r`n"
+          $readmePath = Join-Path (Resolve-Path $dir).Path "README.txt"
+          [System.IO.File]::WriteAllText(
+            $readmePath, $readme, (New-Object System.Text.UTF8Encoding($true))
+          )
+
+          Compress-Archive -Path $dir -DestinationPath $asset -CompressionLevel Optimal
+          $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLower()
+
+          "asset=$asset"   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sha256=$hash"   | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Get-ChildItem $dir | Select-Object Name, Length
 
       - name: Build release notes
         shell: bash
@@ -81,8 +102,17 @@ jobs:
             fi
             echo "## Установка"
             echo
-            echo "Скачайте \`${{ steps.package.outputs.asset }}\`, положите в любую папку и запустите."
-            echo "Настройки и история сохраняются рядом с \`.exe\`."
+            echo "Скачайте \`${{ steps.package.outputs.asset }}\` и распакуйте — внутри готовая папка:"
+            echo
+            echo "\`\`\`"
+            echo "${{ github.event.repository.name }}-${{ github.ref_name }}\\"
+            echo "├─ copy-cat.exe"
+            echo "├─ README.txt"
+            echo "└─ LICENSE.txt"
+            echo "\`\`\`"
+            echo
+            echo "Положите папку туда, где есть право на запись, и запустите \`copy-cat.exe\` —"
+            echo "настройки и история появятся рядом с ним."
             echo
             echo "---"
             echo
@@ -103,6 +133,4 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            ${{ steps.package.outputs.asset }}
-            ${{ steps.package.outputs.asset }}.sha256
+          files: ${{ steps.package.outputs.asset }}
