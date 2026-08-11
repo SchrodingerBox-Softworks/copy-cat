@@ -79,13 +79,44 @@ struct AppSettings {
     hide_after_copy: bool,
     capture_text: bool,
     capture_images: bool,
+    /// Оформление: тёмное, светлое или «как в системе».
+    theme: ThemeChoice,
+}
+
+/// Выбор темы. Отдельно от `egui::ThemePreference`, чтобы формат
+/// `settings.json` не зависел от serde-фич egui.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ThemeChoice {
+    #[default]
+    Dark,
+    Light,
+    System,
+}
+
+impl ThemeChoice {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Тёмная",
+            Self::Light => "Светлая",
+            Self::System => "Как в системе",
+        }
+    }
+
+    fn preference(self) -> egui::ThemePreference {
+        match self {
+            Self::Dark => egui::ThemePreference::Dark,
+            Self::Light => egui::ThemePreference::Light,
+            Self::System => egui::ThemePreference::System,
+        }
+    }
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             max_items: 100,
-            poll_interval_ms: 500,
+            poll_interval_ms: 600,
             hotkey: "Ctrl+Shift+V".to_string(),
             hotkey_enabled: true,
             show_at_cursor: true,
@@ -93,6 +124,7 @@ impl Default for AppSettings {
             hide_after_copy: true,
             capture_text: true,
             capture_images: true,
+            theme: ThemeChoice::Dark,
         }
     }
 }
@@ -109,14 +141,17 @@ fn decode_icon() -> (Vec<u8>, u32, u32) {
 
 // ---------- тема оформления ----------
 
-/// Тёмная тема со скруглёнными углами и одним акцентным цветом.
-fn build_visuals(accent: Color32) -> egui::Visuals {
-    let mut visuals = egui::Visuals::dark();
+/// Оформление для одной из тем: скруглённые углы и один акцентный цвет.
+/// Тёмной задаём собственную палитру, светлой хватает стандартной egui-шной.
+fn build_visuals(theme: egui::Theme, accent: Color32) -> egui::Visuals {
+    let mut visuals = theme.default_visuals();
 
-    visuals.panel_fill = Color32::from_rgb(0x1e, 0x21, 0x28);
-    visuals.window_fill = Color32::from_rgb(0x24, 0x28, 0x30);
-    visuals.extreme_bg_color = Color32::from_rgb(0x17, 0x19, 0x1f);
-    visuals.faint_bg_color = Color32::from_rgb(0x2a, 0x2e, 0x37);
+    if theme == egui::Theme::Dark {
+        visuals.panel_fill = Color32::from_rgb(0x1e, 0x21, 0x28);
+        visuals.window_fill = Color32::from_rgb(0x24, 0x28, 0x30);
+        visuals.extreme_bg_color = Color32::from_rgb(0x17, 0x19, 0x1f);
+        visuals.faint_bg_color = Color32::from_rgb(0x2a, 0x2e, 0x37);
+    }
     visuals.hyperlink_color = accent;
     visuals.selection.bg_fill = accent.linear_multiply(0.55);
     visuals.window_corner_radius = CornerRadius::same(12);
@@ -135,6 +170,23 @@ fn build_visuals(accent: Color32) -> egui::Visuals {
     visuals.widgets.active.bg_fill = accent.linear_multiply(0.55);
 
     visuals
+}
+
+/// Регистрирует оформление обеих тем и включает выбранную.
+///
+/// Одного `set_visuals` мало: он пишет в стиль *текущей* темы, а eframe затем
+/// присылает системную тему и переключается на её нетронутый стиль — из-за
+/// этого приложение открывалось светлым на светлой Windows.
+fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
+    ctx.set_visuals_of(egui::Theme::Dark, build_visuals(egui::Theme::Dark, ACCENT));
+    ctx.set_visuals_of(
+        egui::Theme::Light,
+        build_visuals(egui::Theme::Light, ACCENT),
+    );
+    ctx.set_theme(choice.preference());
+    // Панели текущего кадра уже нарисованы старым стилем, а нового события не
+    // будет — без явного запроса окно так и застынет наполовину перекрашенным.
+    ctx.request_repaint();
 }
 
 // ---------- приложение ----------
@@ -194,8 +246,6 @@ struct PreviewCache {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(build_visuals(ACCENT));
-
         let (rgba, width, height) = decode_icon();
         let color_image =
             egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
@@ -204,6 +254,7 @@ impl App {
                 .load_texture("app_icon", color_image, egui::TextureOptions::LINEAR);
 
         let settings: AppSettings = load_json(&settings_path(), AppSettings::default());
+        apply_theme(&cc.egui_ctx, settings.theme);
         let store = Arc::new(Mutex::new(HistoryStore::open(base_dir().join("clipboard"))));
 
         let show_requested = Arc::new(AtomicBool::new(false));
@@ -482,7 +533,7 @@ impl eframe::App for App {
             .unwrap_or_default();
         if self
             .selected
-            .map_or(false, |id| !all_items.iter().any(|it| it.id == id))
+            .is_some_and(|id| !all_items.iter().any(|it| it.id == id))
         {
             self.selected = None;
             self.preview = PreviewCache::default();
@@ -882,6 +933,24 @@ impl App {
             .resizable(false)
             .default_width(340.0)
             .show(ctx, |ui| {
+                ui.label(RichText::new("Оформление").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Тема:");
+                    for choice in [ThemeChoice::Dark, ThemeChoice::Light, ThemeChoice::System] {
+                        if ui
+                            .selectable_label(self.settings.theme == choice, choice.label())
+                            .clicked()
+                            && self.settings.theme != choice
+                        {
+                            self.settings.theme = choice;
+                            apply_theme(ui.ctx(), choice);
+                            self.save_settings();
+                        }
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.label(RichText::new("История").strong());
                 ui.horizontal(|ui| {
                     ui.label("Хранить записей:");
