@@ -1,0 +1,98 @@
+# name: Release
+
+# # Запускается после того, как workflow "CI" отработает на master, и только
+# # если он завершился успешно
+# on:
+#   workflow_run:
+#     workflows: ["CI"]
+#     types: [completed]
+#     branches: [master]
+
+# permissions:
+#   contents: write
+
+# jobs:
+#   release:
+#     if: github.event.workflow_run.conclusion == 'success'
+#     runs-on: windows-latest
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           ref: ${{ github.event.workflow_run.head_sha }}
+#           fetch-depth: 0
+
+#       - name: Install Rust toolchain
+#         uses: dtolnay/rust-toolchain@stable
+
+#       - name: Install git-cliff
+#         uses: taiki-e/install-action@git-cliff
+
+#       - name: Cache cargo
+#         uses: Swatinem/rust-cache@v2
+
+#       - name: Determine version tag
+#         id: tag
+#         shell: bash
+#         run: |
+#           RAW=$(git-cliff --bumped-version)
+#           if [[ "$RAW" != v* ]]; then
+#             TAG="v${RAW}"
+#           else
+#             TAG="$RAW"
+#           fi
+#           SHORT_SHA=$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-6)
+#           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+#           echo "APP_VERSION=${TAG}-${SHORT_SHA}" >> "$GITHUB_ENV"
+
+#       - name: Build release
+#         run: cargo build --release --verbose
+
+#       - name: Determine release title
+#         id: title
+#         shell: bash
+#         run: |
+#           SUBJECT=$(git log -1 --format=%s "${{ github.event.workflow_run.head_sha }}")
+#           echo "subject=$SUBJECT" >> "$GITHUB_OUTPUT"
+
+#       - name: Compute checksum
+#         id: checksum
+#         shell: bash
+#         run: |
+#           HASH=$(sha256sum target/release/peer-control-rs.exe | awk '{print $1}')
+#           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+
+#       - name: Generate changelog
+#         uses: orhun/git-cliff-action@v4
+#         with:
+#           config: cliff.toml
+#           args: --unreleased --tag ${{ steps.tag.outputs.tag }} --strip header
+#         env:
+#           OUTPUT: CHANGELOG_LATEST.md
+#           GITHUB_REPO: ${{ github.repository }}
+
+#       - name: Build release notes
+#         shell: bash
+#         run: |
+#           {
+#             cat CHANGELOG_LATEST.md
+#             echo
+#             if [ -f assets/screenshot.png ]; then
+#               echo "---"
+#               echo
+#               echo "![screenshot](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.workflow_run.head_sha }}/assets/screenshot.png)"
+#               echo
+#             fi
+#             echo "---"
+#             echo
+#             echo "**SHA256** (\`peer-control-rs.exe\`): \`${{ steps.checksum.outputs.sha256 }}\`"
+#           } > RELEASE_BODY.md
+
+#       - name: Create GitHub release
+#         uses: softprops/action-gh-release@v2
+#         with:
+#           tag_name: ${{ steps.tag.outputs.tag }}
+#           name: "${{ steps.tag.outputs.tag }} — ${{ steps.title.outputs.subject }}"
+#           target_commitish: ${{ github.event.workflow_run.head_sha }}
+#           body_path: RELEASE_BODY.md
+#           files: target/release/peer-control-rs.exe
