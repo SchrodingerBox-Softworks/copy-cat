@@ -139,30 +139,6 @@ cargo fmt --all -- --check; cargo clippy --all-targets -- -D warnings; cargo tes
 [`arboard`](https://github.com/1Password/arboard) · [`global-hotkey`](https://github.com/tauri-apps/global-hotkey) ·
 [`windows-sys`](https://github.com/microsoft/windows-rs)
 
-## Релизы
-
-Релиз собирается и публикуется автоматически при пуше тега `vX.Y.Z` —
-см. [`.github/workflows/release.yml`](.github/workflows/release.yml).
-Заголовок и описание релиза берутся из **аннотации тега**:
-
-```bash
-# 1. Поднять версию в Cargo.toml (workflow проверяет совпадение с тегом)
-# 2. Закоммитить
-git commit -am "bump version to 0.2.0"
-git push
-
-# 3. Создать аннотированный тег со своим заголовком и описанием
-git tag -a v0.2.0 -m "Поиск и закрепление" -m "- поиск по истории
-- закреплённые записи не вытесняются лимитом
-- окно открывается у курсора"
-
-# 4. Запушить тег — только это запускает сборку релиза
-git push origin v0.2.0
-```
-
-Первая строка сообщения тега станет именем релиза (`v0.2.0 — Поиск и закрепление`),
-остальное — телом. Тег с суффиксом (`v0.2.0-rc1`) публикуется как pre-release.
-
 ## Лицензия
 
 [MIT](LICENSE)
