@@ -14,6 +14,8 @@ use tray_icon::{
 
 mod autostart;
 mod buffer;
+mod hotkey;
+mod paste;
 
 use buffer::{
     copy_image_to_clipboard, copy_text_to_clipboard, format_ago, spawn_watcher, ClipItem, HistoryStore,
@@ -60,14 +62,36 @@ fn save_json<T: Serialize>(path: &Path, value: &T) {
 #[serde(default)]
 struct AppSettings {
     /// Максимум записей истории; лишние (самые старые) удаляются с диска.
+    /// Закреплённые записи лимитом не вытесняются.
     max_items: usize,
     /// Как часто фоновой поток опрашивает системный буфер обмена.
     poll_interval_ms: u64,
+    /// Комбинация показа окна, например `Ctrl+Shift+V`.
+    hotkey: String,
+    hotkey_enabled: bool,
+    /// Показывать окно рядом с курсором, а не там, где оно было.
+    show_at_cursor: bool,
+    /// После выбора записи вернуть фокус прошлому окну и нажать Ctrl+V.
+    auto_paste: bool,
+    /// Прятать окно после копирования (без вставки).
+    hide_after_copy: bool,
+    capture_text: bool,
+    capture_images: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { max_items: 100, poll_interval_ms: 500 }
+        Self {
+            max_items: 100,
+            poll_interval_ms: 500,
+            hotkey: "Ctrl+Shift+V".to_string(),
+            hotkey_enabled: true,
+            show_at_cursor: true,
+            auto_paste: true,
+            hide_after_copy: true,
+            capture_text: true,
+            capture_images: true,
+        }
     }
 }
 
@@ -129,8 +153,6 @@ struct App {
     icon_texture: egui::TextureHandle,
     _tray: TrayIcon,
     show_requested: Arc<AtomicBool>,
-    quit_requested: Arc<AtomicBool>,
-    allow_close: bool,
     store: Arc<Mutex<HistoryStore>>,
     watcher: WatcherHandle,
     selected: Option<u64>,
@@ -142,7 +164,13 @@ struct App {
     /// в настройки ничего не пишем — иначе промежуточные «1», «10» тут же
     /// подрезали бы историю.
     max_items_input: String,
+    hotkey_input: String,
     autostart_enabled: bool,
+    settings_open: bool,
+    search: String,
+    hotkeys: Option<hotkey::HotkeyService>,
+    /// Окно, активное до вызова CopyCat, — цель автовставки.
+    prev_window: isize,
 }
 
 #[derive(Default)]
@@ -160,29 +188,40 @@ impl App {
         let color_image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
         let icon_texture = cc.egui_ctx.load_texture("app_icon", color_image, egui::TextureOptions::LINEAR);
 
-        let show_requested = Arc::new(AtomicBool::new(false));
-        let quit_requested = Arc::new(AtomicBool::new(false));
-        let tray = build_tray(&cc.egui_ctx, rgba, width, height, show_requested.clone(), quit_requested.clone());
-
         let settings: AppSettings = load_json(&settings_path(), AppSettings::default());
         let store = Arc::new(Mutex::new(HistoryStore::open(base_dir().join("clipboard"))));
+
+        let show_requested = Arc::new(AtomicBool::new(false));
+        let tray = build_tray(&cc.egui_ctx, rgba, width, height, show_requested.clone(), store.clone());
+
         let watcher = spawn_watcher(store.clone(), cc.egui_ctx.clone(), settings.poll_interval_ms, settings.max_items);
+        watcher.capture_text.store(settings.capture_text, Ordering::Relaxed);
+        watcher.capture_images.store(settings.capture_images, Ordering::Relaxed);
+
+        let mut hotkeys = hotkey::HotkeyService::new(cc.egui_ctx.clone());
+        if let Some(service) = hotkeys.as_mut() {
+            service.apply(settings.hotkey_enabled.then_some(settings.hotkey.as_str()));
+        }
 
         let max_items_input = settings.max_items.to_string();
+        let hotkey_input = settings.hotkey.clone();
         Self {
             settings,
             icon_texture,
             _tray: tray,
             show_requested,
-            quit_requested,
-            allow_close: false,
             store,
             watcher,
             selected: None,
             checked: HashSet::new(),
             preview: PreviewCache::default(),
             max_items_input,
+            hotkey_input,
             autostart_enabled: autostart::is_enabled(),
+            settings_open: false,
+            search: String::new(),
+            hotkeys,
+            prev_window: 0,
         }
     }
 
@@ -263,7 +302,7 @@ fn build_tray(
     width: u32,
     height: u32,
     show_requested: Arc<AtomicBool>,
-    quit_requested: Arc<AtomicBool>,
+    store: Arc<Mutex<HistoryStore>>,
 ) -> TrayIcon {
     let icon = TrayImgIcon::from_rgba(rgba, width, height).expect("build tray icon image");
 
@@ -285,12 +324,18 @@ fn build_tray(
 
     let ctx_menu = ctx.clone();
     let show_from_menu = show_requested.clone();
-    let quit_from_menu = quit_requested.clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == show_id {
             show_from_menu.store(true, Ordering::Relaxed);
         } else if event.id == quit_id {
-            quit_from_menu.store(true, Ordering::Relaxed);
+            // Выходим прямо здесь: со спрятанным окном winit не гоняет кадры,
+            // поэтому флаг + request_repaint читались бы только после того,
+            // как цикл разбудит какое-нибудь стороннее событие.
+            // Лок гарантирует, что фоновой поток не пишет индекс прямо сейчас.
+            if let Ok(s) = store.lock() {
+                s.save_index();
+            }
+            std::process::exit(0);
         }
         ctx_menu.request_repaint();
     }));
@@ -309,14 +354,32 @@ fn build_tray(
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.show_requested.swap(false, Ordering::Relaxed) {
+        // Хоткей: запоминаем активное окно ДО показа своего — потом фокус
+        // уже наш, и вставлять будет некуда.
+        if self.hotkeys.as_ref().is_some_and(|h| h.take_trigger()) {
+            self.prev_window = paste::foreground_window();
+            if self.settings.show_at_cursor {
+                if let Some((x, y)) = paste::cursor_pos() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+                        x as f32,
+                        y as f32,
+                    )));
+                }
+            }
             Self::show_window(ctx);
         }
-        if self.quit_requested.swap(false, Ordering::Relaxed) {
-            self.allow_close = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        if self.show_requested.swap(false, Ordering::Relaxed) {
+            self.prev_window = paste::foreground_window();
+            Self::show_window(ctx);
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+        // Escape прячет окно — привычное поведение для вызываемых по хоткею
+        // палитр; приложение при этом остаётся жить в трее.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        // Крестик окна прячет приложение в трей, а не закрывает — выход
+        // делается только через пункт меню в трее.
+        if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -336,46 +399,9 @@ impl eframe::App for App {
                     ui.heading(RichText::new(APP_TITLE).strong());
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Меню настроек — прячем сюда всё, что мешало в топ-баре
-                        // и убирает горизонтальный курсор от DragValue.
-                        ui.menu_button("⚙", |ui| {
-                            ui.set_min_width(240.0);
-                            ui.label(RichText::new("Настройки").strong());
-                            ui.separator();
-
-                            ui.horizontal(|ui| {
-                                ui.label("Хранить записей:");
-                                let resp = ui.add(
-                                    egui::TextEdit::singleline(&mut self.max_items_input)
-                                        .desired_width(64.0)
-                                        .horizontal_align(egui::Align::Center),
-                                );
-                                // Применяем по Enter или когда пользователь
-                                // ушёл из поля; мусорный ввод откатываем.
-                                if resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                    match self.max_items_input.trim().parse::<usize>() {
-                                        Ok(n) if n >= 1 => self.set_max_items(n),
-                                        _ => self.max_items_input = self.settings.max_items.to_string(),
-                                    }
-                                }
-                            });
-                            ui.label(
-                                RichText::new("от 1 до 10 000 · Enter чтобы применить")
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-
-                            #[cfg(windows)]
-                            {
-                                let mut on = self.autostart_enabled;
-                                if ui.checkbox(&mut on, "Автозапуск при старте Windows").changed() {
-                                    match autostart::set(on) {
-                                        Ok(()) => self.autostart_enabled = on,
-                                        Err(_) => self.autostart_enabled = autostart::is_enabled(),
-                                    }
-                                }
-                            }
-                        });
+                        if ui.button("Настройки").clicked() {
+                            self.settings_open = !self.settings_open;
+                        }
 
                         let count = self.store.lock().map(|s| s.items().len()).unwrap_or(0);
                         ui.label(RichText::new(format!("{count} шт.")).color(ui.visuals().weak_text_color()));
@@ -394,22 +420,39 @@ impl eframe::App for App {
             });
 
         // ---------- готовим данные под панели ----------
-        let items: Vec<ClipItem> = self.store.lock().map(|s| s.items().to_vec()).unwrap_or_default();
-        if self.selected.map_or(false, |id| !items.iter().any(|it| it.id == id)) {
+        let all_items: Vec<ClipItem> = self.store.lock().map(|s| s.items().to_vec()).unwrap_or_default();
+        if self.selected.map_or(false, |id| !all_items.iter().any(|it| it.id == id)) {
             self.selected = None;
             self.preview = PreviewCache::default();
         }
 
+        // Закреплённые всегда сверху, внутри групп — порядок хранилища (новые выше).
+        let query = self.search.trim().to_lowercase();
+        let mut items: Vec<ClipItem> = all_items
+            .iter()
+            .filter(|it| query.is_empty() || item_matches(it, &query))
+            .cloned()
+            .collect();
+        items.sort_by_key(|it| !it.pinned);
+
         // ---------- список слева ----------
         let mut requested_copy: Option<u64> = None;
         let mut requested_delete: Option<u64> = None;
+        let mut requested_pin: Option<u64> = None;
         egui::Panel::left("list_panel")
             .resizable(true)
             .default_size(280.0)
             .size_range(200.0..=380.0)
             .frame(egui::Frame::new().fill(ui.visuals().panel_fill).inner_margin(egui::Margin::same(8)))
             .show(ui, |ui| {
-                if items.is_empty() {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Поиск по истории…"),
+                );
+                ui.add_space(4.0);
+
+                if all_items.is_empty() {
                     ui.add_space(24.0);
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new("История пуста").color(ui.visuals().weak_text_color()));
@@ -418,8 +461,16 @@ impl eframe::App for App {
                     });
                     return;
                 }
+                if items.is_empty() {
+                    ui.add_space(24.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new("Ничего не найдено").color(ui.visuals().weak_text_color()));
+                    });
+                    return;
+                }
+
                 ui.horizontal(|ui| {
-                    let all_checked = !items.is_empty() && items.iter().all(|it| self.checked.contains(&it.id));
+                    let all_checked = items.iter().all(|it| self.checked.contains(&it.id));
                     let mut toggle = all_checked;
                     if ui.checkbox(&mut toggle, "Выбрать все").changed() {
                         if toggle {
@@ -445,11 +496,8 @@ impl eframe::App for App {
                         if response.row_clicked {
                             self.selected = Some(item.id);
                         }
-                        if response.copy_clicked {
+                        if response.row_double_clicked {
                             requested_copy = Some(item.id);
-                        }
-                        if response.delete_clicked {
-                            requested_delete = Some(item.id);
                         }
                     }
                 });
@@ -484,7 +532,12 @@ impl eframe::App for App {
                         if ui.button("Удалить").clicked() {
                             requested_delete = Some(item.id);
                         }
-                        if ui.button(RichText::new("Копировать").color(Color32::WHITE)).clicked() {
+                        let pin_label = if item.pinned { "Открепить" } else { "Закрепить" };
+                        if ui.button(pin_label).clicked() {
+                            requested_pin = Some(item.id);
+                        }
+                        let copy_label = if self.settings.auto_paste { "Вставить" } else { "Копировать" };
+                        if ui.button(RichText::new(copy_label).color(Color32::WHITE)).clicked() {
                             requested_copy = Some(item.id);
                         }
                     });
@@ -516,9 +569,14 @@ impl eframe::App for App {
                 }
             });
 
+        self.settings_window(&ctx);
+
         // ---------- отложенные действия из UI-цикла ----------
         if let Some(id) = requested_copy {
-            self.copy_item(id);
+            self.copy_item(&ctx, id);
+        }
+        if let Some(id) = requested_pin {
+            self.toggle_pin(id);
         }
         if let Some(id) = requested_delete {
             self.delete_ids(&[id]);
@@ -540,10 +598,21 @@ impl eframe::App for App {
 }
 
 struct RowResponse {
-    /// Клик по карточке вне зоны чекбокса — значит «выбрать для превью».
+    /// Клик по карточке вне зоны чекбокса — «выбрать для превью».
     row_clicked: bool,
-    copy_clicked: bool,
-    delete_clicked: bool,
+    /// Двойной клик — сразу скопировать (и вставить, если включено).
+    row_double_clicked: bool,
+}
+
+/// Совпадение записи с поисковым запросом (запрос уже в нижнем регистре).
+fn item_matches(item: &ClipItem, query: &str) -> bool {
+    match item.kind {
+        ItemKind::Text => item.snippet.as_deref().is_some_and(|s| s.to_lowercase().contains(query)),
+        ItemKind::Image => {
+            let dims = item.image_dims.map(|(w, h)| format!("{w}x{h} {w}×{h}")).unwrap_or_default();
+            "картинка image img".contains(query) || dims.contains(query)
+        }
+    }
 }
 
 /// Максимальная длина заголовка карточки в символах. Полный текст показывается
@@ -564,79 +633,221 @@ fn draw_list_row(ui: &mut egui::Ui, item: &ClipItem, selected: bool, checked: &m
     let fill = if selected { ACCENT.linear_multiply(0.25) } else { ui.visuals().faint_bg_color };
 
     let row_width = ui.available_width();
-    let mut row_clicked = false;
-    egui::Frame::new()
+    let mut checkbox_rect = egui::Rect::NOTHING;
+
+    let card = egui::Frame::new()
         .fill(fill)
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.set_width(row_width - 4.0);
             ui.horizontal(|ui| {
-                // Чекбокс — самостоятельный виджет со своей зоной клика.
-                ui.checkbox(checked, "");
+                checkbox_rect = ui.checkbox(checked, "").rect;
 
-                // Кликабельна только оставшаяся часть карточки: если накрыть
-                // Sense'ом всю строку, он регистрируется после чекбокса и
-                // перехватывает у него клик — отметить запись становится нельзя.
-                let rest_width = ui.available_width();
-                let rest = ui.allocate_ui_with_layout(
-                    egui::vec2(rest_width, 0.0),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        let kind_label = match item.kind {
-                            ItemKind::Text => "TXT",
-                            ItemKind::Image => "IMG",
-                        };
-                        ui.label(RichText::new(kind_label).monospace().color(ACCENT));
+                let kind_label = match item.kind {
+                    ItemKind::Text => "TXT",
+                    ItemKind::Image => "IMG",
+                };
+                ui.label(RichText::new(kind_label).monospace().color(ACCENT));
 
-                        let full_title = match item.kind {
-                            ItemKind::Text => item.snippet.clone().unwrap_or_default(),
-                            ItemKind::Image => match item.image_dims {
-                                Some((w, h)) => format!("{w}×{h}"),
-                                None => "картинка".to_string(),
-                            },
-                        };
-                        let short_title = truncate_chars(&full_title, MAX_TITLE_CHARS);
-
-                        ui.vertical(|ui| {
-                            let resp = ui.add(
-                                egui::Label::new(RichText::new(&short_title).strong())
-                                    .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                            if short_title != full_title {
-                                resp.on_hover_text(&full_title);
-                            }
-                            ui.label(
-                                RichText::new(format_ago(item.timestamp))
-                                    .small()
-                                    .color(ui.visuals().weak_text_color()),
-                            );
-                        });
+                let full_title = match item.kind {
+                    ItemKind::Text => item.snippet.clone().unwrap_or_default(),
+                    ItemKind::Image => match item.image_dims {
+                        Some((w, h)) => format!("{w}×{h}"),
+                        None => "картинка".to_string(),
                     },
-                );
-                row_clicked = rest.response.interact(egui::Sense::click()).clicked();
+                };
+                let short_title = truncate_chars(&full_title, MAX_TITLE_CHARS);
+
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        if item.pinned {
+                            ui.label(RichText::new("PIN").small().monospace().color(ACCENT));
+                        }
+                        ui.add(
+                            egui::Label::new(RichText::new(&short_title).strong())
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+                    ui.label(
+                        RichText::new(format_ago(item.timestamp))
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                });
             });
         });
 
+    // Хит-тест руками по прямоугольнику карточки. Через обычный `interact`
+    // клик перехватывали вложенные Label'ы (они сенсят hover ради тултипов),
+    // из-за чего верхняя половина строки не реагировала на выбор.
+    let card_rect = card.response.rect;
+    let pointer = ui.input(|i| i.pointer.interact_pos());
+    let inside = pointer.is_some_and(|p| card_rect.contains(p) && !checkbox_rect.contains(p));
+    let row_clicked = inside && ui.input(|i| i.pointer.primary_clicked());
+    let row_double_clicked = inside && ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary));
+
     ui.add_space(4.0);
-    RowResponse { row_clicked, copy_clicked: false, delete_clicked: false }
+    RowResponse { row_clicked, row_double_clicked }
 }
 
 impl App {
-    fn copy_item(&mut self, id: u64) {
+    fn copy_item(&mut self, ctx: &egui::Context, id: u64) {
         let Some(item) = self.store.lock().ok().and_then(|s| s.get(id).cloned()) else { return };
-        match item.kind {
-            ItemKind::Text => {
-                if let Some(text) = self.store.lock().ok().and_then(|s| s.load_text(id)) {
-                    copy_text_to_clipboard(&text, &self.watcher.last_seen_hash);
-                }
-            }
-            ItemKind::Image => {
-                if let Some((rgba, w, h)) = self.store.lock().ok().and_then(|s| s.load_image_rgba(id)) {
-                    copy_image_to_clipboard(rgba, w, h, &self.watcher.last_seen_hash);
-                }
-            }
+        let copied = match item.kind {
+            ItemKind::Text => self
+                .store
+                .lock()
+                .ok()
+                .and_then(|s| s.load_text(id))
+                .is_some_and(|text| copy_text_to_clipboard(&text, &self.watcher.last_seen_hash)),
+            ItemKind::Image => self
+                .store
+                .lock()
+                .ok()
+                .and_then(|s| s.load_image_rgba(id))
+                .is_some_and(|(rgba, w, h)| {
+                    copy_image_to_clipboard(rgba, w, h, &self.watcher.last_seen_hash)
+                }),
+        };
+        if !copied {
+            return;
         }
+
+        if self.settings.auto_paste && self.prev_window != 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            paste::restore_and_paste(self.prev_window);
+            self.prev_window = 0;
+        } else if self.settings.hide_after_copy {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+    }
+
+    fn toggle_pin(&mut self, id: u64) {
+        if let Ok(mut s) = self.store.lock() {
+            let pinned = s.get(id).map(|it| it.pinned).unwrap_or(false);
+            s.set_pinned(id, !pinned);
+            s.save_index();
+        }
+    }
+
+    /// Отдельное окно настроек: в поповере `menu_button` поля ввода
+    /// закрывались от первого же клика.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.settings_open;
+        egui::Window::new("Настройки")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("История").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Хранить записей:");
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.max_items_input)
+                            .desired_width(72.0)
+                            .horizontal_align(egui::Align::Center),
+                    );
+                    if resp.lost_focus() {
+                        match self.max_items_input.trim().parse::<usize>() {
+                            Ok(n) if n >= 1 => self.set_max_items(n),
+                            _ => self.max_items_input = self.settings.max_items.to_string(),
+                        }
+                    }
+                    ui.label(
+                        RichText::new("закреплённые не считаются")
+                            .small()
+                            .color(ui.visuals().weak_text_color()),
+                    );
+                });
+
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut self.settings.capture_text, "Ловить текст").changed() {
+                        self.watcher.capture_text.store(self.settings.capture_text, Ordering::Relaxed);
+                        self.save_settings();
+                    }
+                    if ui.checkbox(&mut self.settings.capture_images, "Ловить картинки").changed() {
+                        self.watcher.capture_images.store(self.settings.capture_images, Ordering::Relaxed);
+                        self.save_settings();
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Опрос буфера, мс:");
+                    let mut ms = self.settings.poll_interval_ms as f32;
+                    if ui.add(egui::Slider::new(&mut ms, 100.0..=2000.0).step_by(50.0)).changed() {
+                        self.settings.poll_interval_ms = ms as u64;
+                        self.watcher.poll_ms.store(self.settings.poll_interval_ms, Ordering::Relaxed);
+                        self.save_settings();
+                    }
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("Горячая клавиша").strong());
+
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut self.settings.hotkey_enabled, "Включить").changed() {
+                        self.reapply_hotkey();
+                    }
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.hotkey_input)
+                            .desired_width(150.0)
+                            .hint_text("Ctrl+Shift+V"),
+                    );
+                    if resp.lost_focus() {
+                        self.settings.hotkey = self.hotkey_input.trim().to_string();
+                        self.reapply_hotkey();
+                    }
+                });
+                ui.label(
+                    RichText::new("Например: Ctrl+Shift+V, Alt+C, Ctrl+Alt+Space")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                if let Some(err) = self.hotkeys.as_ref().and_then(|h| h.error.clone()) {
+                    ui.colored_label(Color32::from_rgb(0xe5, 0x73, 0x73), err);
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("Поведение").strong());
+
+                if ui
+                    .checkbox(&mut self.settings.auto_paste, "Вставлять сразу (Ctrl+V в прошлое окно)")
+                    .changed()
+                {
+                    self.save_settings();
+                }
+                if ui.checkbox(&mut self.settings.hide_after_copy, "Прятать окно после копирования").changed() {
+                    self.save_settings();
+                }
+                if ui.checkbox(&mut self.settings.show_at_cursor, "Показывать окно у курсора").changed() {
+                    self.save_settings();
+                }
+
+                #[cfg(windows)]
+                {
+                    let mut on = self.autostart_enabled;
+                    if ui.checkbox(&mut on, "Автозапуск при старте Windows").changed() {
+                        match autostart::set(on) {
+                            Ok(()) => self.autostart_enabled = on,
+                            Err(_) => self.autostart_enabled = autostart::is_enabled(),
+                        }
+                    }
+                }
+            });
+        self.settings_open = open;
+    }
+
+    fn reapply_hotkey(&mut self) {
+        let spec = self.settings.hotkey.clone();
+        let enabled = self.settings.hotkey_enabled;
+        if let Some(service) = self.hotkeys.as_mut() {
+            service.apply(enabled.then_some(spec.as_str()));
+        }
+        self.save_settings();
     }
 }
 

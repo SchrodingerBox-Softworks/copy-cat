@@ -33,6 +33,9 @@ pub struct ClipItem {
     pub snippet: Option<String>,
     /// Размеры картинки в пикселях.
     pub image_dims: Option<(u32, u32)>,
+    /// Закреплённые записи не вытесняются лимитом истории.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -100,6 +103,7 @@ impl HistoryStore {
             hash,
             snippet: Some(snippet),
             image_dims: None,
+            pinned: false,
         });
         Some(id)
     }
@@ -125,6 +129,7 @@ impl HistoryStore {
             hash,
             snippet: None,
             image_dims: Some((image.width as u32, image.height as u32)),
+            pinned: false,
         });
         Some(id)
     }
@@ -146,10 +151,19 @@ impl HistoryStore {
         let _ = std::fs::remove_file(self.payload_path(id, ext_for(it.kind)));
     }
 
+    /// Подрезает историю до лимита, начиная со старых. Закреплённые записи
+    /// пропускаются — они живут, пока их не открепят или не удалят вручную.
     pub fn trim_to(&mut self, max_items: usize) {
         while self.items.len() > max_items {
-            let Some(it) = self.items.pop() else { break };
+            let Some(pos) = self.items.iter().rposition(|it| !it.pinned) else { break };
+            let it = self.items.remove(pos);
             let _ = std::fs::remove_file(self.payload_path(it.id, ext_for(it.kind)));
+        }
+    }
+
+    pub fn set_pinned(&mut self, id: u64, pinned: bool) {
+        if let Some(it) = self.items.iter_mut().find(|it| it.id == id) {
+            it.pinned = pinned;
         }
     }
 }
@@ -196,7 +210,12 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 pub struct WatcherHandle {
     pub last_seen_hash: Arc<AtomicU64>,
     pub max_items: Arc<AtomicUsize>,
-    pub stop: Arc<AtomicBool>,
+    /// Пауза захвата — «приватный режим»: буфер не пишется в историю.
+    pub paused: Arc<AtomicBool>,
+    pub capture_text: Arc<AtomicBool>,
+    pub capture_images: Arc<AtomicBool>,
+    /// Интервал опроса в мс; поток перечитывает его каждый цикл.
+    pub poll_ms: Arc<AtomicU64>,
 }
 
 pub fn spawn_watcher(
@@ -205,27 +224,45 @@ pub fn spawn_watcher(
     poll_ms: u64,
     max_items: usize,
 ) -> WatcherHandle {
-    let last_seen_hash = Arc::new(AtomicU64::new(0));
-    let max_items = Arc::new(AtomicUsize::new(max_items));
-    let stop = Arc::new(AtomicBool::new(false));
-    let lsh = last_seen_hash.clone();
-    let stop_flag = stop.clone();
-    let max_flag = max_items.clone();
+    let handle = WatcherHandle {
+        last_seen_hash: Arc::new(AtomicU64::new(0)),
+        max_items: Arc::new(AtomicUsize::new(max_items)),
+        paused: Arc::new(AtomicBool::new(false)),
+        capture_text: Arc::new(AtomicBool::new(true)),
+        capture_images: Arc::new(AtomicBool::new(true)),
+        poll_ms: Arc::new(AtomicU64::new(poll_ms.max(50))),
+    };
+
+    let lsh = handle.last_seen_hash.clone();
+    let max_flag = handle.max_items.clone();
+    let paused = handle.paused.clone();
+    let want_text = handle.capture_text.clone();
+    let want_images = handle.capture_images.clone();
+    let poll = handle.poll_ms.clone();
     thread::spawn(move || {
         let mut clipboard = match Clipboard::new() {
             Ok(c) => c,
             Err(_) => return,
         };
-        let interval = Duration::from_millis(poll_ms.max(50));
-        while !stop_flag.load(Ordering::Relaxed) {
-            thread::sleep(interval);
-            let added = try_capture_once(&mut clipboard, &store, &lsh, max_flag.load(Ordering::Relaxed));
+        loop {
+            thread::sleep(Duration::from_millis(poll.load(Ordering::Relaxed).max(50)));
+            if paused.load(Ordering::Relaxed) {
+                continue;
+            }
+            let added = try_capture_once(
+                &mut clipboard,
+                &store,
+                &lsh,
+                max_flag.load(Ordering::Relaxed),
+                want_text.load(Ordering::Relaxed),
+                want_images.load(Ordering::Relaxed),
+            );
             if added {
                 ctx.request_repaint();
             }
         }
     });
-    WatcherHandle { last_seen_hash, max_items, stop }
+    handle
 }
 
 fn try_capture_once(
@@ -233,9 +270,11 @@ fn try_capture_once(
     store: &Mutex<HistoryStore>,
     last_seen_hash: &AtomicU64,
     max_items: usize,
+    want_text: bool,
+    want_images: bool,
 ) -> bool {
     // Текст имеет приоритет — Win+Shift+S тексту не мешает.
-    if let Ok(text) = clipboard.get_text() {
+    if let Some(text) = clipboard.get_text().ok().filter(|_| want_text) {
         if text.is_empty() {
             return false;
         }
@@ -255,7 +294,7 @@ fn try_capture_once(
         }
         return added;
     }
-    if let Ok(img) = clipboard.get_image() {
+    if let Some(img) = clipboard.get_image().ok().filter(|_| want_images) {
         let h = fnv1a(&img.bytes);
         if h == last_seen_hash.load(Ordering::Relaxed) {
             return false;
