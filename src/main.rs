@@ -22,7 +22,12 @@ use buffer::{
     copy_text_to_clipboard, format_ago, spawn_watcher,
 };
 
+/// Accent for fills and selection highlights.
 const ACCENT: Color32 = Color32::PURPLE;
+/// The same accent, but readable as text. `PURPLE` is (128, 0, 128): fine
+/// behind something, far too dark to read on the dark panels.
+const ACCENT_ON_DARK: Color32 = Color32::from_rgb(0xc9, 0x7b, 0xf5);
+const ACCENT_ON_LIGHT: Color32 = Color32::from_rgb(0x7b, 0x2c, 0xbf);
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 /// Short name for the UI, where the icon and the layout already give context.
 const APP_TITLE: &str = "CopyCat";
@@ -150,6 +155,15 @@ fn decode_icon() -> (Vec<u8>, u32, u32) {
 
 // ---------- theme ----------
 
+/// Accent shade that stays legible against the current theme's background.
+fn accent_text(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        ACCENT_ON_DARK
+    } else {
+        ACCENT_ON_LIGHT
+    }
+}
+
 /// Rounded corners and a single accent colour. The dark theme gets its own
 /// palette; for light, egui's defaults are good enough.
 fn build_visuals(theme: egui::Theme, accent: Color32) -> egui::Visuals {
@@ -161,7 +175,7 @@ fn build_visuals(theme: egui::Theme, accent: Color32) -> egui::Visuals {
         visuals.extreme_bg_color = Color32::from_rgb(0x17, 0x19, 0x1f);
         visuals.faint_bg_color = Color32::from_rgb(0x2a, 0x2e, 0x37);
     }
-    visuals.hyperlink_color = accent;
+    visuals.hyperlink_color = accent_text(&visuals);
     visuals.selection.bg_fill = accent.linear_multiply(0.55);
     visuals.window_corner_radius = CornerRadius::same(12);
     visuals.menu_corner_radius = CornerRadius::same(8);
@@ -511,7 +525,7 @@ impl eframe::App for App {
                         RichText::new(APP_VERSION)
                             .small()
                             .monospace()
-                            .color(ACCENT.linear_multiply(2.0)),
+                            .color(accent_text(ui.visuals())),
                     )
                     .on_hover_text(format!("{SYSTEM_TITLE}\n{VENDOR}"));
                     ui.hyperlink_to(RichText::new(format!("by {}", VENDOR)).size(13.0), REPO_URL);
@@ -572,8 +586,8 @@ impl eframe::App for App {
         let mut requested_pin: Option<u64> = None;
         egui::Panel::left("list_panel")
             .resizable(true)
-            .default_size(280.0)
-            .size_range(200.0..=380.0)
+            .default_size(320.0)
+            .size_range(240.0..=420.0)
             .frame(
                 egui::Frame::new()
                     .fill(ui.visuals().panel_fill)
@@ -645,6 +659,12 @@ impl eframe::App for App {
                             }
                             if response.row_double_clicked {
                                 requested_copy = Some(item.id);
+                            }
+                            match response.action {
+                                Some(RowAction::Copy) => requested_copy = Some(item.id),
+                                Some(RowAction::TogglePin) => requested_pin = Some(item.id),
+                                Some(RowAction::Delete) => requested_delete = Some(item.id),
+                                None => {}
                             }
                         }
                     });
@@ -781,11 +801,34 @@ impl eframe::App for App {
 }
 
 struct RowResponse {
-    /// Click on the card, away from the checkbox: select it for preview.
+    /// Click on the card, away from the checkbox and the action buttons:
+    /// select it for preview.
     row_clicked: bool,
     /// Double click: copy straight away, and paste too if that's enabled.
     row_double_clicked: bool,
+    /// One of the row's own quick-action buttons was pressed.
+    action: Option<RowAction>,
 }
+
+/// Buttons sitting on the right edge of every row, so the common operations
+/// don't need a trip through the preview pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowAction {
+    Copy,
+    TogglePin,
+    Delete,
+}
+
+// Glyphs come from the fonts egui bundles, and coverage there is patchy: `📋`
+// draws as a luggage tag, for instance. These three render as expected.
+const ICON_COPY: &str = "🗐";
+const ICON_PIN: &str = "📌";
+const ICON_DELETE: &str = "🗑";
+
+const ICON_SIZE: f32 = 22.0;
+/// Strip on the right of every row that belongs to the buttons. Fixed on
+/// purpose: they have to line up in a column whatever the titles do.
+const ACTIONS_WIDTH: f32 = 3.0 * ICON_SIZE + 2.0 * 4.0 + 8.0;
 
 /// Whether an entry matches the search query. The query is already lowercased.
 fn item_matches(item: &ClipItem, query: &str) -> bool {
@@ -833,23 +876,33 @@ fn draw_list_row(
         ui.visuals().faint_bg_color
     };
 
-    let row_width = ui.available_width();
-    let mut checkbox_rect = egui::Rect::NOTHING;
+    // Frame margins eat 8px on each side; the 4 left over keep the card clear
+    // of the scrollbar.
+    let content_width = (ui.available_width() - 20.0).max(80.0);
+    // Widgets living inside the card. A click that lands on one of them is
+    // theirs, not a row selection.
+    let mut blockers: Vec<egui::Rect> = Vec::with_capacity(4);
+    let mut action = None;
 
     let card = egui::Frame::new()
         .fill(fill)
         .corner_radius(CornerRadius::same(6))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            ui.set_width(row_width - 4.0);
+            ui.set_width(content_width);
             ui.horizontal(|ui| {
-                checkbox_rect = ui.checkbox(checked, "").rect;
+                let content_left = ui.cursor().min.x;
+                blockers.push(ui.checkbox(checked, "").rect);
 
                 let kind_label = match item.kind {
                     ItemKind::Text => "TXT",
                     ItemKind::Image => "IMG",
                 };
-                ui.label(RichText::new(kind_label).monospace().color(ACCENT));
+                ui.label(
+                    RichText::new(kind_label)
+                        .monospace()
+                        .color(accent_text(ui.visuals())),
+                );
 
                 let full_title = match item.kind {
                     ItemKind::Text => item.snippet.clone().unwrap_or_default(),
@@ -860,31 +913,81 @@ fn draw_list_row(
                 };
                 let short_title = truncate_chars(&full_title, MAX_TITLE_CHARS);
 
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        if item.pinned {
-                            ui.label(RichText::new("PIN").small().monospace().color(ACCENT));
-                        }
-                        ui.add(
-                            egui::Label::new(RichText::new(&short_title).strong())
-                                .wrap_mode(egui::TextWrapMode::Extend),
+                // Whatever the checkbox and the TXT/IMG tag didn't take, minus
+                // the strip the buttons own. Measured from the card itself:
+                // `available_width` inside a scroll area isn't bounded, and
+                // going by it let long titles shove the buttons off the row.
+                let used = ui.cursor().min.x - content_left;
+                let title_width = (content_width - used - ACTIONS_WIDTH).max(40.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(title_width, 0.0),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        ui.set_width(title_width);
+                        ui.horizontal(|ui| {
+                            if item.pinned {
+                                ui.label(
+                                    RichText::new("PIN")
+                                        .small()
+                                        .monospace()
+                                        .color(accent_text(ui.visuals())),
+                                );
+                            }
+                            ui.add(
+                                egui::Label::new(RichText::new(&short_title).strong())
+                                    .wrap_mode(egui::TextWrapMode::Truncate),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(format_ago(item.timestamp))
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
                         );
-                    });
-                    ui.label(
-                        RichText::new(format_ago(item.timestamp))
-                            .small()
-                            .color(ui.visuals().weak_text_color()),
-                    );
-                });
+                    },
+                );
             });
         });
+
+    let card_rect = card.response.rect;
+
+    // Buttons go into rects measured off the card's right edge instead of being
+    // laid out inline, so they line up in a column down the whole list however
+    // long the titles are.
+    let pin_hint = if item.pinned {
+        "Открепить"
+    } else {
+        "Закрепить"
+    };
+    let mut right = card_rect.right() - 8.0;
+    for (icon, hint, what) in [
+        (ICON_DELETE, "Удалить", RowAction::Delete),
+        (ICON_PIN, pin_hint, RowAction::TogglePin),
+        (ICON_COPY, "Копировать", RowAction::Copy),
+    ] {
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(right - ICON_SIZE / 2.0, card_rect.center().y),
+            egui::vec2(ICON_SIZE, ICON_SIZE),
+        );
+        let color = if what == RowAction::TogglePin && item.pinned {
+            accent_text(ui.visuals())
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let button = egui::Button::new(RichText::new(icon).size(13.0).color(color)).frame(false);
+        let response = ui.put(rect, button).on_hover_text(hint);
+        blockers.push(rect);
+        if response.clicked() {
+            action = Some(what);
+        }
+        right -= ICON_SIZE + 4.0;
+    }
 
     // Hit test the card rect by hand. With a plain `interact` the nested labels
     // stole the click (they sense hover for their tooltips), which left the top
     // half of a row dead to selection.
-    let card_rect = card.response.rect;
     let pointer = ui.input(|i| i.pointer.interact_pos());
-    let inside = pointer.is_some_and(|p| card_rect.contains(p) && !checkbox_rect.contains(p));
+    let inside =
+        pointer.is_some_and(|p| card_rect.contains(p) && !blockers.iter().any(|r| r.contains(p)));
     let row_clicked = inside && ui.input(|i| i.pointer.primary_clicked());
     let row_double_clicked = inside
         && ui.input(|i| {
@@ -896,6 +999,7 @@ fn draw_list_row(
     RowResponse {
         row_clicked,
         row_double_clicked,
+        action,
     }
 }
 
